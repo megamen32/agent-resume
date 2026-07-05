@@ -29,7 +29,7 @@ HOME = Path.home()
 STATE_DIR = Path(os.environ.get("AGENT_RESUME_STATE_DIR", HOME / ".local/state/agent-resume"))
 CONFIG_PATH = Path(os.environ.get("AGENT_RESUME_CONFIG", HOME / ".config/agent-resume/config.json"))
 SERVER_NAME = "agent-resume"
-SERVER_VERSION = "0.1.6"
+SERVER_VERSION = "0.1.7"
 
 
 def now_iso() -> str:
@@ -523,6 +523,286 @@ def resume_agent(args: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+# ---------------- background wait/resume ----------------
+
+def parse_duration_seconds(value: Any, default: int = 0) -> int:
+    if value is None or value == "":
+        return default
+    if isinstance(value, (int, float)):
+        return max(0, int(float(value)))
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    for suffix, mult in (("ms", 0.001), ("s", 1), ("m", 60), ("h", 3600)):
+        if text.endswith(suffix):
+            try:
+                return max(0, int(float(text[:-len(suffix)].strip()) * mult + 0.999))
+            except Exception as e:
+                raise ValueError(f"invalid duration: {value!r}") from e
+    try:
+        return max(0, int(float(text)))
+    except Exception as e:
+        raise ValueError(f"invalid duration: {value!r}") from e
+
+
+def is_pid_alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat")
+        if stat.exists():
+            parts = stat.read_text(errors="replace").split()
+            if len(parts) >= 3 and parts[2] == "Z":
+                return False
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def find_pids_by_query(query: str) -> List[Dict[str, Any]]:
+    q = str(query or "").strip()
+    if not q:
+        raise ValueError("query is required")
+    me = os.getpid()
+    p = subprocess.run(["/bin/bash", "-lc", "ps -eo pid=,args="], text=True, capture_output=True, timeout=10)
+    matches: List[Dict[str, Any]] = []
+    for line in p.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            pid_s, cmd = line.split(None, 1)
+            pid = int(pid_s)
+        except Exception:
+            continue
+        if pid == me:
+            continue
+        if q in cmd and "agent_resume.py" not in cmd:
+            matches.append({"pid": pid, "cmd": cmd[:500]})
+    return matches
+
+
+def agent_resume_script() -> str:
+    return str(Path(__file__).resolve())
+
+
+def job_paths(job_id: Optional[str] = None) -> Dict[str, Path]:
+    jid = job_id or (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])
+    root = STATE_DIR / "jobs" / jid
+    return {"job_id": Path(jid), "root": root, "meta": root / "meta.json", "log": root / "job.log", "watcher_log": root / "watcher.log"}
+
+
+def write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
+    os.replace(tmp, path)
+
+
+def read_json(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text())
+
+
+def freeze_resume_target(args: Dict[str, Any]) -> Dict[str, Any]:
+    frozen_args = dict(args)
+    frozen_args.pop("execute", None)
+    # Build once while MCP _meta is available; this freezes Codex thread id now.
+    frozen = resume_agent(frozen_args)
+    return {
+        "agent": frozen["agent"],
+        "cwd": frozen["cwd"],
+        "session_id": frozen["session_id"],
+        "session_id_source": frozen.get("session_id_source"),
+        "marker": frozen.get("marker"),
+    }
+
+
+def start_watcher(meta_path: Path) -> Dict[str, Any]:
+    watcher_log = meta_path.parent / "watcher.log"
+    cmd = f"setsid {shlex.quote(sys.executable)} {shlex.quote(agent_resume_script())} _watch --meta {shlex.quote(str(meta_path))} > {shlex.quote(str(watcher_log))} 2>&1 < /dev/null & echo $!"
+    p = subprocess.run(["/bin/bash", "-lc", cmd], text=True, capture_output=True, timeout=10)
+    if p.returncode != 0:
+        raise RuntimeError(f"failed to start watcher: {p.stderr or p.stdout}")
+    return {"watcher_pid": int(p.stdout.strip().splitlines()[-1]), "watcher_log": str(watcher_log)}
+
+
+def tool_run_and_resume(args: Dict[str, Any]) -> Dict[str, Any]:
+    command = str(args.get("command") or "").strip()
+    if not command:
+        raise ValueError("command is required")
+    cwd = str(safe_cwd(args.get("cwd")))
+    target = freeze_resume_target(args)
+    paths = job_paths(str(args.get("job_id") or "").strip() or None)
+    root = paths["root"]; root.mkdir(parents=True, exist_ok=False)
+    log_file = str(args.get("log_file") or paths["log"])
+    hard_timeout = parse_duration_seconds(args.get("hard_timeout", "0"), default=0)
+    note = str(args.get("note") or "")
+    launch = subprocess.run(
+        ["/bin/bash", "-lc", f"setsid bash -lc {shlex.quote(command)} > {shlex.quote(log_file)} 2>&1 < /dev/null & echo $!"],
+        cwd=cwd, text=True, capture_output=True, timeout=10,
+    )
+    if launch.returncode != 0:
+        raise RuntimeError(f"failed to launch command: {launch.stderr or launch.stdout}")
+    pid = int(launch.stdout.strip().splitlines()[-1])
+    meta = {
+        "job_id": paths["job_id"].name,
+        "kind": "command",
+        "state": "running",
+        "created_at": now_iso(),
+        "started_at": now_iso(),
+        "command": command,
+        "pid": pid,
+        "cwd": cwd,
+        "log_file": log_file,
+        "hard_timeout_seconds": hard_timeout,
+        "note": note,
+        "resume": target,
+        "execute_resume": bool(args.get("execute_resume", True)),
+    }
+    write_json(paths["meta"], meta)
+    meta.update(start_watcher(paths["meta"]))
+    write_json(paths["meta"], meta)
+    return {"ok": True, "job_id": meta["job_id"], "pid": pid, "log_file": log_file, "watcher_pid": meta["watcher_pid"], "watcher_log": meta["watcher_log"], "resume": target}
+
+
+def tool_attach_pid_and_resume(args: Dict[str, Any]) -> Dict[str, Any]:
+    pid = int(args.get("pid") or 0)
+    if pid <= 0:
+        raise ValueError("pid must be positive")
+    if not is_pid_alive(pid):
+        raise ValueError(f"pid {pid} is not alive")
+    target = freeze_resume_target(args)
+    paths = job_paths(str(args.get("job_id") or "").strip() or None)
+    root = paths["root"]; root.mkdir(parents=True, exist_ok=False)
+    log_file = str(args.get("log_file") or "") or None
+    meta = {
+        "job_id": paths["job_id"].name,
+        "kind": "pid",
+        "state": "running",
+        "created_at": now_iso(),
+        "pid": pid,
+        "cwd": str(safe_cwd(args.get("cwd"))),
+        "log_file": log_file,
+        "hard_timeout_seconds": parse_duration_seconds(args.get("hard_timeout", "0"), default=0),
+        "note": str(args.get("note") or ""),
+        "resume": target,
+        "execute_resume": bool(args.get("execute_resume", True)),
+    }
+    write_json(paths["meta"], meta)
+    meta.update(start_watcher(paths["meta"]))
+    write_json(paths["meta"], meta)
+    return {"ok": True, "job_id": meta["job_id"], "pid": pid, "log_file": log_file, "watcher_pid": meta["watcher_pid"], "watcher_log": meta["watcher_log"], "resume": target}
+
+
+def tool_attach_query_and_resume(args: Dict[str, Any]) -> Dict[str, Any]:
+    matches = find_pids_by_query(str(args.get("query") or ""))
+    if not matches:
+        raise ValueError("no process matched query")
+    if len(matches) > 1 and not bool(args.get("first", False)):
+        raise ValueError(f"query matched multiple processes; pass first=true or pid. matches={matches[:5]}")
+    pid = int(matches[0]["pid"])
+    next_args = dict(args)
+    next_args["pid"] = pid
+    result = tool_attach_pid_and_resume(next_args)
+    result["matched"] = matches[0]
+    return result
+
+
+def tool_wait_and_resume(args: Dict[str, Any]) -> Dict[str, Any]:
+    wait_seconds = parse_duration_seconds(args.get("wait_seconds", args.get("seconds")), default=0)
+    if wait_seconds <= 0:
+        raise ValueError("wait_seconds must be > 0")
+    target = freeze_resume_target(args)
+    paths = job_paths(str(args.get("job_id") or "").strip() or None)
+    root = paths["root"]; root.mkdir(parents=True, exist_ok=False)
+    meta = {
+        "job_id": paths["job_id"].name,
+        "kind": "timer",
+        "state": "running",
+        "created_at": now_iso(),
+        "wait_seconds": wait_seconds,
+        "cwd": str(safe_cwd(args.get("cwd"))),
+        "log_file": str(args.get("log_file") or "") or None,
+        "note": str(args.get("note") or ""),
+        "resume": target,
+        "execute_resume": bool(args.get("execute_resume", True)),
+    }
+    write_json(paths["meta"], meta)
+    meta.update(start_watcher(paths["meta"]))
+    write_json(paths["meta"], meta)
+    return {"ok": True, "job_id": meta["job_id"], "wait_seconds": wait_seconds, "watcher_pid": meta["watcher_pid"], "watcher_log": meta["watcher_log"], "resume": target}
+
+
+def tool_wait_job_status(args: Dict[str, Any]) -> Dict[str, Any]:
+    job_id = str(args.get("job_id") or "").strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    meta = STATE_DIR / "jobs" / job_id / "meta.json"
+    if not meta.exists():
+        raise FileNotFoundError(f"job not found: {job_id}")
+    data = read_json(meta)
+    pid = data.get("pid")
+    data["alive"] = bool(pid and is_pid_alive(int(pid)))
+    return data
+
+
+def watcher_main(meta_path: str) -> int:
+    path = Path(meta_path)
+    meta = read_json(path)
+    start = time.time()
+    timeout_s = int(meta.get("hard_timeout_seconds") or 0)
+    state = "finished"
+    timed_out = False
+    pid = meta.get("pid")
+    try:
+        if meta.get("kind") == "timer":
+            time.sleep(int(meta.get("wait_seconds") or 0))
+        elif pid:
+            while is_pid_alive(int(pid)):
+                if timeout_s and time.time() - start >= timeout_s:
+                    timed_out = True
+                    state = "timeout"
+                    break
+                time.sleep(2)
+        meta["finished_at"] = now_iso()
+        meta["elapsed_seconds"] = int(time.time() - start)
+        meta["state"] = state
+        meta["timed_out"] = timed_out
+        note_parts = []
+        if meta.get("note"):
+            note_parts.append(str(meta["note"]))
+        if meta.get("kind") == "timer":
+            note_parts.append(f"Timer elapsed after {meta.get('wait_seconds')}s.")
+        elif timed_out:
+            note_parts.append(f"Hard timeout reached after {timeout_s}s; watched process may still be alive.")
+        else:
+            note_parts.append("Watched process finished.")
+        resume = dict(meta.get("resume") or {})
+        resume_args = {
+            "agent": resume.get("agent"),
+            "cwd": resume.get("cwd") or meta.get("cwd"),
+            "session_id": resume.get("session_id"),
+            "job_id": meta.get("job_id"),
+            "log_file": meta.get("log_file"),
+            "note": " ".join(note_parts),
+            "execute": bool(meta.get("execute_resume", True)),
+        }
+        result = resume_agent(resume_args)
+        meta["resume_result"] = result
+        write_json(path, meta)
+        return 0 if result.get("ok") else 1
+    except Exception as e:
+        meta["state"] = "watcher_error"
+        meta["error"] = f"{e.__class__.__name__}: {e}"
+        meta["finished_at"] = now_iso()
+        write_json(path, meta)
+        print(meta["error"], file=sys.stderr)
+        return 1
+
+
 def register(args: Dict[str, Any]) -> Dict[str, Any]:
     agent = resolve_agent(args.get("agent"))
     cwd = str(safe_cwd(args.get("cwd")))
@@ -553,6 +833,31 @@ BASE_TOOLS = {
         "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"prompt":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"query":{"type":["string","null"]},"marker":{"type":["string","null"],"description":"Required unless session_id is explicit. Exactly 5 ASCII alphanumeric chars [A-Za-z0-9]."},"execute":{"type":"boolean","default":False,"description":"If true, start the resume command detached. Default false for safety."}},"required":[],"additionalProperties":True},
         "handler": resume_agent,
     },
+    "run_and_resume": {
+        "description": "Run a non-interactive command in background, wait until it finishes or hard_timeout is reached, then resume the same agent chat. This is the agent-resume replacement for notify long-wait flow. For Codex the current thread is frozen from MCP _meta; for OpenCode/Claude pass cwd+marker.",
+        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"command":{"type":"string"},"cwd":{"type":["string","null"]},"marker":{"type":["string","null"],"description":"Required for OpenCode/Claude unless session_id is explicit."},"session_id":{"type":["string","null"]},"query":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"hard_timeout":{"type":["string","integer","null"],"default":"0","description":"Maximum watch time, e.g. 30m, 1h. 0 disables timeout. Does not kill the process; resumes with timeout note."},"execute_resume":{"type":"boolean","default":True,"description":"Default true. Set false only for tests: watcher records the resume command but does not launch it."}},"required":["command"],"additionalProperties":True},
+        "handler": tool_run_and_resume,
+    },
+    "attach_pid_and_resume": {
+        "description": "Watch an existing PID and resume the same agent chat when it exits or hard_timeout is reached. For Codex current thread comes from MCP _meta; for OpenCode/Claude pass cwd+marker.",
+        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"pid":{"type":"integer"},"cwd":{"type":["string","null"]},"marker":{"type":["string","null"]},"session_id":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"hard_timeout":{"type":["string","integer","null"],"default":"0"},"execute_resume":{"type":"boolean","default":True,"description":"Default true. Set false only for tests."}},"required":["pid"],"additionalProperties":True},
+        "handler": tool_attach_pid_and_resume,
+    },
+    "attach_query_and_resume": {
+        "description": "Find a process by command substring, watch it, and resume the same agent chat when it exits or hard_timeout is reached. Safer to pass pid when known; pass first=true only if multiple matches are acceptable.",
+        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"query":{"type":"string"},"first":{"type":"boolean","default":False},"cwd":{"type":["string","null"]},"marker":{"type":["string","null"]},"session_id":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"hard_timeout":{"type":["string","integer","null"],"default":"0"},"execute_resume":{"type":"boolean","default":True,"description":"Default true. Set false only for tests."}},"required":["query"],"additionalProperties":True},
+        "handler": tool_attach_query_and_resume,
+    },
+    "wait_and_resume": {
+        "description": "Wait a fixed duration, then resume the same agent chat. Useful when the thing to wait for has no stable PID but a timed follow-up is needed. For long command/process waits prefer run_and_resume or attach_pid_and_resume.",
+        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"wait_seconds":{"type":["string","integer"]},"cwd":{"type":["string","null"]},"marker":{"type":["string","null"]},"session_id":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"execute_resume":{"type":"boolean","default":True,"description":"Default true. Set false only for tests."}},"required":["wait_seconds"],"additionalProperties":True},
+        "handler": tool_wait_and_resume,
+    },
+    "wait_job_status": {
+        "description": "Read status for an agent-resume background wait job created by run_and_resume/attach_*_and_resume/wait_and_resume.",
+        "inputSchema": {"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"],"additionalProperties":False},
+        "handler": tool_wait_job_status,
+    },
     "register_agent": {
         "description": "Optional manual registration of current client/session. Normally agent identity should be configured once through AGENT_RESUME_AGENT in the MCP config, not passed on every call.",
         "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"label":{"type":["string","null"]},"marker":{"type":["string","null"],"description":"Exactly 5 ASCII alphanumeric chars [A-Za-z0-9] correlation marker."},"metadata":{"type":["object","null"]}},"required":[],"additionalProperties":True},
@@ -567,22 +872,39 @@ def tools_for_client() -> Dict[str, Dict[str, Any]]:
     schema = tools["build_resume_command"]["inputSchema"]
     props = schema["properties"]
 
+    wait_tools = ["run_and_resume", "attach_pid_and_resume", "attach_query_and_resume", "wait_and_resume"]
+
+    def tune_wait_tools(required_extra: List[str], marker_text: str) -> None:
+        for name in wait_tools:
+            ws = tools[name]["inputSchema"]
+            base = list(ws.get("required") or [])
+            for item in required_extra:
+                if item not in base:
+                    base.append(item)
+            ws["required"] = base
+            if "marker" in ws.get("properties", {}):
+                ws["properties"]["marker"]["description"] = marker_text
+
     if agent == "codex":
         schema["required"] = []
         props["marker"]["description"] = "Optional for Codex: Codex passes session id as MCP _meta.threadId. Use marker only as fallback/debug."
         schema["description"] = "Codex: session id is taken from MCP request _meta.threadId; marker is not required. use_last is disabled."
         tools["build_resume_command"]["description"] = schema["description"]
+        tune_wait_tools([], "Optional for Codex; current thread id is captured from MCP _meta before the watcher starts.")
     elif agent in {"opencode", "claude"}:
         schema["required"] = ["cwd", "marker"]
         props["cwd"]["description"] = "Required for OpenCode/Claude session lookup."
         props["marker"]["description"] = "Required for OpenCode/Claude. Exactly 5 ASCII alphanumeric chars [A-Za-z0-9]."
         schema["description"] = f"{agent}: cwd and marker are required; session id is not provided by MCP. use_last is disabled."
         tools["build_resume_command"]["description"] = schema["description"]
+        tune_wait_tools(["cwd", "marker"], f"Required for {agent}; exactly 5 ASCII alphanumeric chars [A-Za-z0-9].")
     else:
         schema["anyOf"] = [{"required": ["session_id"]}, {"required": ["cwd", "marker"]}]
         props["marker"]["description"] = "Required with cwd unless session_id is explicit. Exactly 5 ASCII alphanumeric chars [A-Za-z0-9]."
         schema["description"] = "Generic mode: provide explicit session_id or cwd + marker. Codex client configs normally pass session id via _meta.threadId."
         tools["build_resume_command"]["description"] = schema["description"]
+        for name in wait_tools:
+            tools[name]["inputSchema"]["anyOf"] = [{"required": ["session_id"]}, {"required": ["cwd", "marker"]}]
     return tools
 
 
@@ -636,8 +958,10 @@ def cli_main() -> None:
     f.add_argument("--agent", choices=["codex","opencode","claude"], help="Defaults to AGENT_RESUME_AGENT/config.json"); f.add_argument("--cwd"); f.add_argument("--query"); f.add_argument("--marker"); f.add_argument("--limit", type=int, default=20)
     r=sub.add_parser("resume")
     r.add_argument("--agent", choices=["codex","opencode","claude"], help="Defaults to AGENT_RESUME_AGENT/config.json"); r.add_argument("--cwd"); r.add_argument("--session-id"); r.add_argument("--prompt"); r.add_argument("--job-id"); r.add_argument("--log-file"); r.add_argument("--note"); r.add_argument("--query"); r.add_argument("--marker"); r.add_argument("--execute", action="store_true")
+    w = sub.add_parser("_watch"); w.add_argument("--meta", required=True)
     sub.add_parser("mcp")
     args=ap.parse_args()
+    if args.cmd == "_watch": raise SystemExit(watcher_main(args.meta))
     if args.cmd == "mcp": mcp_main(); return
     if args.cmd == "find": print(json.dumps({"sessions": find_sessions(args.agent, args.cwd, args.query, args.limit, args.marker)}, ensure_ascii=False, indent=2)); return
     if args.cmd == "resume": print(json.dumps(resume_agent(vars(args)), ensure_ascii=False, indent=2)); return

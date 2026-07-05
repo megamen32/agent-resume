@@ -259,7 +259,7 @@ def install_claude(path: Path) -> dict[str, Any]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("clients", nargs="*", choices=["codex", "opencode", "claude"], default=["codex", "opencode", "claude"])
+    ap.add_argument("clients", nargs="*", choices=["codex", "opencode", "claude"], default=["codex", "opencode"], help="Defaults to codex+opencode. Claude can resume by itself; pass claude explicitly only if you want the experimental fallback.")
     ap.add_argument("--codex-config", default="~/.codex/config.toml")
     ap.add_argument("--opencode-config", default="~/.config/opencode/opencode.jsonc")
     ap.add_argument("--claude-config", default="~/.claude.json")

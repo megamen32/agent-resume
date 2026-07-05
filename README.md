@@ -1,30 +1,30 @@
 # agent-resume
 
-MCP/CLI helper that finds and resumes local coding-agent sessions after a background job finishes.
+MCP/CLI helper that waits for background work and resumes the same local coding-agent session when the work is done.
 
-It is meant to be paired with long-running job watchers such as `notify-mcp`: instead of only notifying a human, a watcher can ask `agent-resume` to wake the same CLI coding agent and continue the task.
+`agent-resume` is now the long-wait/control-plane tool. It can run a command, attach to an existing PID/query, or wait a fixed timer, then wake the same CLI coding agent and continue the task. `notify` is only an optional human Telegram ping.
 
 ## Supported agents
 
 - Codex CLI: `codex exec resume <SESSION_ID> "prompt"` or `codex exec resume --last "prompt"`
 - OpenCode: `opencode --session <SESSION_ID> --prompt "prompt"` or `opencode --continue --prompt "prompt"`
-- Claude Code: `claude --print --resume <SESSION_ID> "prompt"` or `claude --print --continue "prompt"`
+- Claude Code: supported as a fallback, but normally not installed because Claude can resume itself.
 
 
 ## Install into clients automatically
 
-Run the installer to write ready-to-use MCP config entries for all supported clients:
+Run the installer to write ready-to-use MCP config entries for Codex and OpenCode:
 
 ```bash
 npx -y github:megamen32/agent-resume --help
-python3 scripts/install-client-configs.py codex opencode claude
+python3 scripts/install-client-configs.py codex opencode
 ```
 
 The installer sets client identity once in each MCP config:
 
 - Codex: `env = { "AGENT_RESUME_AGENT" = "codex" }` in `~/.codex/config.toml`
 - OpenCode: `environment.AGENT_RESUME_AGENT = "opencode"` in `~/.config/opencode/opencode.jsonc`
-- Claude Code: `env.AGENT_RESUME_AGENT = "claude"` in `~/.claude.json`
+- Claude Code is not installed by default; Claude can resume itself. Pass `claude` explicitly to the installer only if you want the fallback.
 
 After that, tools can be called without passing `agent`.
 
@@ -77,6 +77,36 @@ A local fallback also works:
 { "agent": "codex" }
 ```
 
+
+## Long wait and automatic resume
+
+`agent-resume` has built-in background waiting now. It does not need `notify` to watch long work.
+
+MCP tools:
+
+- `run_and_resume` — run a non-interactive command, wait for it to exit, then resume the same chat.
+- `attach_pid_and_resume` — watch an existing PID and resume when it exits.
+- `attach_query_and_resume` — find a process by command substring, watch it, then resume.
+- `wait_and_resume` — wait a fixed duration, then resume.
+- `wait_job_status` — inspect the background wait job state.
+
+Default behavior is `execute_resume=true`: when the watched process/timer finishes, the watcher launches the appropriate resume command in the background. Set `execute_resume=false` only for tests.
+
+For Codex, the current thread id is captured immediately from MCP `_meta.threadId` before the watcher detaches. For OpenCode, pass `cwd + marker` so the watcher can freeze the exact target session before it starts waiting.
+
+Example:
+
+```json
+{
+  "command": "npm test",
+  "cwd": "/repo",
+  "marker": "Q7xK2",
+  "note": "test suite",
+  "hard_timeout": "30m"
+}
+```
+
+When the command exits, `agent-resume` resumes the same chat with job id, log file, status, and note.
 
 ## Resume identity and marker rules
 
@@ -148,6 +178,11 @@ Tools:
 
 - `find_sessions` — list likely sessions for `agent=codex|opencode|claude`.
 - `build_resume_command` — choose a session and build or execute the resume command.
+- `run_and_resume` — run command, wait, then resume.
+- `attach_pid_and_resume` — watch PID, then resume.
+- `attach_query_and_resume` — find process by query, watch, then resume.
+- `wait_and_resume` — timer wait, then resume.
+- `wait_job_status` — inspect wait job state.
 - `register_agent` — let a client record its agent identity and optional session id.
 
 ## How it finds sessions
@@ -158,7 +193,7 @@ Tools:
 
 ## Current limitation
 
-This first version resumes CLI sessions non-interactively. It does not inject text into an already-open terminal UI. For interactive/TUI reattachment, pair this with `pty-mcp` or tmux in a later version.
+`agent-resume` resumes CLI sessions non-interactively by launching the client resume command. It does not inject keystrokes into an already-open TUI. For true interactive prompts/TUIs, use a terminal-specific tool manually.
 
 ## Source findings
 
