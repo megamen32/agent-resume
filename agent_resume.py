@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import uuid
 import shlex
 import sqlite3
 import subprocess
@@ -27,7 +29,7 @@ HOME = Path.home()
 STATE_DIR = Path(os.environ.get("AGENT_RESUME_STATE_DIR", HOME / ".local/state/agent-resume"))
 CONFIG_PATH = Path(os.environ.get("AGENT_RESUME_CONFIG", HOME / ".config/agent-resume/config.json"))
 SERVER_NAME = "agent-resume"
-SERVER_VERSION = "0.1.1"
+SERVER_VERSION = "0.1.3"
 
 
 def now_iso() -> str:
@@ -81,6 +83,48 @@ def resolve_agent(agent: Optional[str]) -> str:
         "agent is not configured. Set AGENT_RESUME_AGENT=codex|opencode|claude in this MCP server config, "
         "or pass agent explicitly, or write ~/.config/agent-resume/config.json with {\"agent\":\"codex\"}."
     )
+
+
+RUN_ID_RE = re.compile(r"^[0-9]{13}$")
+
+
+def validate_run_id(run_id: Any, *, required: bool = False) -> Optional[str]:
+    """Validate correlation id used to avoid fuzzy session matching.
+
+    Accepted forms:
+    - 13-digit epoch milliseconds, e.g. 1783217856841
+    - UUID4, canonical or parseable by uuid.UUID
+    """
+    if run_id is None or str(run_id).strip() == "":
+        if required:
+            raise ValueError("run_id is required unless session_id is explicit or use_last=true. Pass 13-digit epoch milliseconds or a UUID4.")
+        return None
+    value = str(run_id).strip()
+    if RUN_ID_RE.fullmatch(value):
+        return value
+    try:
+        u = uuid.UUID(value)
+    except Exception:
+        raise ValueError("run_id must be 13-digit epoch milliseconds or UUID4")
+    if u.version != 4:
+        raise ValueError("run_id UUID must be version 4")
+    return str(u)
+
+
+def text_has(needle: Optional[str], *values: Any) -> bool:
+    if not needle:
+        return False
+    n = str(needle).lower()
+    return n in "\n".join(str(v or "") for v in values).lower()
+
+
+def match_score(query: Optional[str], run_id: Optional[str], *values: Any) -> float:
+    score = 0.0
+    if run_id and text_has(run_id, *values):
+        score += 100.0
+    if query and text_has(query, *values):
+        score += 10.0
+    return score
 
 
 def safe_cwd(cwd: Optional[str]) -> Path:
@@ -140,7 +184,7 @@ def parse_time(value: Any) -> float:
         return 0.0
 
 
-def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None) -> List[SessionCandidate]:
+def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None, run_id: Optional[str] = None) -> List[SessionCandidate]:
     """Find Codex sessions.
 
     Preferred source is ~/.codex/state_5.sqlite: threads table has id, cwd,
@@ -171,8 +215,7 @@ def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[
                             score += 12
                     except Exception:
                         pass
-                if query and query.lower() in title.lower():
-                    score += 10
+                score += match_score(query, run_id, title, rcwd, r["rollout_path"], r["git_branch"])
                 if not r["agent_nickname"]:
                     score += 1
                 out.append(SessionCandidate(
@@ -195,15 +238,14 @@ def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[
                 title = item.get("thread_name") or ""
                 updated = item.get("updated_at")
                 score = 0.0
-                if query and query.lower() in title.lower():
-                    score += 10
+                score += match_score(query, run_id, title, str(cwd) if cwd else None)
                 ts = parse_time(updated)
                 out.append(SessionCandidate("codex", sid, str(cwd) if cwd else None, title, ts, str(path), score, {"updated_at": updated}))
     out.sort(key=lambda x: (x.score, x.updated or 0), reverse=True)
     return out[:limit]
 
 
-def opencode_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None) -> List[SessionCandidate]:
+def opencode_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None, run_id: Optional[str] = None) -> List[SessionCandidate]:
     dbs = [
         HOME / ".local/share/opencode/opencode.db",
     ]
@@ -245,8 +287,7 @@ def opencode_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Option
                     pass
             if cwd_s and pathval and pathval.strip("/") in cwd_s.strip("/"):
                 score += 5
-            if query and query.lower() in title.lower():
-                score += 10
+            score += match_score(query, run_id, title, directory, pathval)
             # prefer root sessions by default
             if not r["parent_id"]:
                 score += 1
@@ -271,7 +312,7 @@ def claude_project_dir(cwd: Path) -> Path:
     return HOME / ".claude/projects" / str(cwd).replace("/", "-")
 
 
-def claude_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None) -> List[SessionCandidate]:
+def claude_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None, run_id: Optional[str] = None) -> List[SessionCandidate]:
     roots: List[Path] = []
     if cwd:
         roots.append(claude_project_dir(cwd))
@@ -308,32 +349,34 @@ def claude_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional
             score = 0.0
             if cwd and root == claude_project_dir(cwd):
                 score += 20
-            if query and title and query.lower() in title.lower():
-                score += 10
+            score += match_score(query, run_id, title, path.name, str(f))
             out.append(SessionCandidate("claude", sid, str(cwd) if cwd else None, title, f.stat().st_mtime, str(f), score))
     out.sort(key=lambda x: (x.score, x.updated or 0), reverse=True)
     return out[:limit]
 
 
-def find_sessions(agent: Optional[str] = None, cwd: Optional[str] = None, query: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+def find_sessions(agent: Optional[str] = None, cwd: Optional[str] = None, query: Optional[str] = None, limit: int = 20, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
     a = resolve_agent(agent)
+    rid = validate_run_id(run_id) if run_id else None
     p = safe_cwd(cwd) if cwd else None
     if a == "codex":
-        rows = codex_sessions(p, limit, query)
+        rows = codex_sessions(p, limit, query, rid)
     elif a == "opencode":
-        rows = opencode_sessions(p, limit, query)
+        rows = opencode_sessions(p, limit, query, rid)
     else:
-        rows = claude_sessions(p, limit, query)
+        rows = claude_sessions(p, limit, query, rid)
     return [asdict(x) for x in rows]
 
 
-def default_prompt(job_id: Optional[str], log_file: Optional[str], status: Optional[Dict[str, Any]], note: Optional[str]) -> str:
+def default_prompt(job_id: Optional[str], log_file: Optional[str], status: Optional[Dict[str, Any]], note: Optional[str], run_id: Optional[str] = None) -> str:
     rc = None
     state = None
     if status:
         rc = status.get("returncode")
         state = status.get("state")
     parts = ["Background job finished. Resume the previous task and continue from the result."]
+    if run_id:
+        parts.append(f"Run id: {run_id}")
     if note:
         parts.append(f"Note: {note}")
     if job_id:
@@ -375,20 +418,25 @@ def resume_agent(args: Dict[str, Any]) -> Dict[str, Any]:
     agent = resolve_agent(args.get("agent"))
     cwd = str(safe_cwd(args.get("cwd")))
     session_id = args.get("session_id") or args.get("session")
+    use_last_requested = bool(args.get("use_last", False))
+    run_id = validate_run_id(args.get("run_id"), required=not session_id and not use_last_requested)
     query = args.get("query") or args.get("title_query")
     candidates: List[Dict[str, Any]] = []
-    if not session_id and not bool(args.get("use_last", False)):
-        candidates = find_sessions(agent, cwd, query=query, limit=5)
-        if candidates:
+    if not session_id and not use_last_requested:
+        candidates = find_sessions(agent, cwd, query=query, limit=5, run_id=run_id)
+        if candidates and (not run_id or float(candidates[0].get("score") or 0) >= 100.0):
             session_id = candidates[0]["session_id"]
-    prompt = args.get("prompt") or default_prompt(args.get("job_id"), args.get("log_file"), args.get("status"), args.get("note"))
-    use_last = bool(args.get("use_last", False)) or not session_id
+    if not session_id and not use_last_requested:
+        raise ValueError(f"no session matched run_id={run_id!r} query={query!r} cwd={cwd!r}; refusing to fall back to --last")
+    prompt = args.get("prompt") or default_prompt(args.get("job_id"), args.get("log_file"), args.get("status"), args.get("note"), run_id=run_id)
+    use_last = use_last_requested or not session_id
     cmd = build_resume_command(agent, str(session_id) if session_id else None, cwd, str(prompt), use_last=use_last)
     result: Dict[str, Any] = {
         "ok": True,
         "agent": agent,
         "cwd": cwd,
         "session_id": session_id,
+        "run_id": run_id,
         "used_last": use_last,
         "candidates": candidates,
         "command": cmd,
@@ -398,9 +446,8 @@ def resume_agent(args: Dict[str, Any]) -> Dict[str, Any]:
     if args.get("execute"):
         log_dir = STATE_DIR / "runs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{agent}"
-        log = log_dir / f"{run_id}.log"
-        # detached, because this is intended to wake an agent without blocking the watcher.
+        launch_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{agent}"
+        log = log_dir / f"{launch_id}.log"
         shell = f"setsid {' '.join(shlex.quote(x) for x in cmd)} > {shlex.quote(str(log))} 2>&1 < /dev/null & echo $!"
         p = subprocess.run(["/bin/bash", "-lc", shell], cwd=cwd, text=True, capture_output=True, timeout=10)
         result.update({"executed": True, "launch_returncode": p.returncode, "launch_stdout": p.stdout, "launch_stderr": p.stderr, "log_file": str(log)})
@@ -418,7 +465,8 @@ def register(args: Dict[str, Any]) -> Dict[str, Any]:
     session_id = args.get("session_id") or args.get("session")
     label = args.get("label") or args.get("name") or "default"
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    rec = {"agent": agent, "cwd": cwd, "session_id": session_id, "label": label, "updated_at": now_iso(), "metadata": args.get("metadata") or {}}
+    run_id = validate_run_id(args.get("run_id")) if args.get("run_id") else None
+    rec = {"agent": agent, "cwd": cwd, "session_id": session_id, "run_id": run_id, "label": label, "updated_at": now_iso(), "metadata": args.get("metadata") or {}}
     path = STATE_DIR / "registry.jsonl"
     with path.open("a") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -432,18 +480,18 @@ TOOLS = {
         "handler": lambda a: {"default_agent": default_agent(), "config_path": str(CONFIG_PATH), "config": load_config(), "env_agent": os.environ.get("AGENT_RESUME_AGENT"), "state_dir": str(STATE_DIR)},
     },
     "find_sessions": {
-        "description": "Find likely local CLI coding-agent sessions. Agent is optional when AGENT_RESUME_AGENT=codex|opencode|claude is set in this MCP server config. Use cwd/query to pick the right chat before resuming.",
-        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"],"description":"Project directory to scope session search."},"query":{"type":["string","null"],"description":"Optional title/text query."},"limit":{"type":["integer","null"],"default":20}},"required":[],"additionalProperties":False},
-        "handler": lambda a: {"sessions": find_sessions(a.get("agent"), a.get("cwd"), a.get("query"), int(a.get("limit") or 20))},
+        "description": "Find likely local CLI coding-agent sessions. Agent is optional when AGENT_RESUME_AGENT=codex|opencode|claude is set in this MCP server config. Use cwd/query/run_id to pick the right chat before resuming.",
+        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"],"description":"Project directory to scope session search."},"query":{"type":["string","null"],"description":"Optional title/text query."},"run_id":{"type":["string","null"],"description":"Correlation marker: 13-digit epoch milliseconds or UUID4. Adds exact-match scoring."},"limit":{"type":["integer","null"],"default":20}},"required":[],"additionalProperties":False},
+        "handler": lambda a: {"sessions": find_sessions(a.get("agent"), a.get("cwd"), a.get("query"), int(a.get("limit") or 20), a.get("run_id"))},
     },
     "build_resume_command": {
-        "description": "Build the command that would resume an agent session. Agent is optional when configured via AGENT_RESUME_AGENT. Dry-run by default; returns shell_command. For Codex uses codex exec resume, for OpenCode opencode --session/--continue, for Claude claude --print --resume/--continue.",
-        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"use_last":{"type":"boolean","default":False},"prompt":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"query":{"type":["string","null"]},"execute":{"type":"boolean","default":False,"description":"If true, start the resume command detached. Default false for safety."}},"required":[],"additionalProperties":True},
+        "description": "Build the command that would resume an agent session. Agent is optional when configured via AGENT_RESUME_AGENT. Dry-run by default; returns shell_command. To prevent waking the wrong chat, run_id is required unless session_id is explicit or use_last=true. For Codex uses codex exec resume, for OpenCode opencode --session/--continue, for Claude claude --print --resume/--continue.",
+        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"use_last":{"type":"boolean","default":False},"prompt":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"query":{"type":["string","null"]},"run_id":{"type":["string","null"],"description":"Required unless session_id is explicit or use_last=true. Must be 13-digit epoch milliseconds or UUID4."},"execute":{"type":"boolean","default":False,"description":"If true, start the resume command detached. Default false for safety."}},"required":[],"additionalProperties":True},
         "handler": resume_agent,
     },
     "register_agent": {
         "description": "Optional manual registration of current client/session. Normally agent identity should be configured once through AGENT_RESUME_AGENT in the MCP config, not passed on every call.",
-        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"label":{"type":["string","null"]},"metadata":{"type":["object","null"]}},"required":[],"additionalProperties":True},
+        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"label":{"type":["string","null"]},"run_id":{"type":["string","null"],"description":"13-digit epoch milliseconds or UUID4 correlation marker."},"metadata":{"type":["object","null"]}},"required":[],"additionalProperties":True},
         "handler": register,
     },
 }
@@ -493,13 +541,13 @@ def cli_main() -> None:
     ap=argparse.ArgumentParser(description="Find and resume local CLI coding-agent sessions")
     sub=ap.add_subparsers(dest="cmd", required=True)
     f=sub.add_parser("find")
-    f.add_argument("--agent", choices=["codex","opencode","claude"], help="Defaults to AGENT_RESUME_AGENT/config.json"); f.add_argument("--cwd"); f.add_argument("--query"); f.add_argument("--limit", type=int, default=20)
+    f.add_argument("--agent", choices=["codex","opencode","claude"], help="Defaults to AGENT_RESUME_AGENT/config.json"); f.add_argument("--cwd"); f.add_argument("--query"); f.add_argument("--run-id"); f.add_argument("--limit", type=int, default=20)
     r=sub.add_parser("resume")
-    r.add_argument("--agent", choices=["codex","opencode","claude"], help="Defaults to AGENT_RESUME_AGENT/config.json"); r.add_argument("--cwd"); r.add_argument("--session-id"); r.add_argument("--use-last", action="store_true"); r.add_argument("--prompt"); r.add_argument("--job-id"); r.add_argument("--log-file"); r.add_argument("--note"); r.add_argument("--query"); r.add_argument("--execute", action="store_true")
+    r.add_argument("--agent", choices=["codex","opencode","claude"], help="Defaults to AGENT_RESUME_AGENT/config.json"); r.add_argument("--cwd"); r.add_argument("--session-id"); r.add_argument("--use-last", action="store_true"); r.add_argument("--prompt"); r.add_argument("--job-id"); r.add_argument("--log-file"); r.add_argument("--note"); r.add_argument("--query"); r.add_argument("--run-id"); r.add_argument("--execute", action="store_true")
     sub.add_parser("mcp")
     args=ap.parse_args()
     if args.cmd == "mcp": mcp_main(); return
-    if args.cmd == "find": print(json.dumps({"sessions": find_sessions(args.agent, args.cwd, args.query, args.limit)}, ensure_ascii=False, indent=2)); return
+    if args.cmd == "find": print(json.dumps({"sessions": find_sessions(args.agent, args.cwd, args.query, args.limit, args.run_id)}, ensure_ascii=False, indent=2)); return
     if args.cmd == "resume": print(json.dumps(resume_agent(vars(args)), ensure_ascii=False, indent=2)); return
 
 if __name__ == "__main__":

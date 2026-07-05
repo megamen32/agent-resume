@@ -77,6 +77,31 @@ A local fallback also works:
 { "agent": "codex" }
 ```
 
+
+## Correlation `run_id`
+
+Do not rely on “latest session” when a background job finishes. Pass a unique `run_id` into the session title/prompt/cwd and into `agent-resume`:
+
+- 13-digit epoch milliseconds, for example `1783217856841`
+- or UUID4, for example `4b8d8e62-cc95-4c4b-9c06-1f9b15c7c1c2`
+
+`build_resume_command` now requires `run_id` unless you pass an explicit `session_id` or `use_last=true`. If no candidate has an exact `run_id` match, it refuses to fall back to `--last`. This prevents waking the wrong chat.
+
+Example:
+
+```bash
+RUN_ID=$(date +%s%3N)
+opencode run --title "$RUN_ID" "Do the task. Marker: $RUN_ID"
+AGENT_RESUME_AGENT=opencode ./agent_resume.py resume --cwd "$PWD" --run-id "$RUN_ID" --job-id job-123 --log-file /tmp/job.log
+```
+
+For custom/local OpenCode builds, set `OPENCODE_DISABLE_CHANNEL_DB=true` if you want all sessions in the standard database:
+
+```bash
+export OPENCODE_DISABLE_CHANNEL_DB=true
+# writes to ~/.local/share/opencode/opencode.db instead of opencode-<channel>.db
+```
+
 ## Where SESSION_ID comes from
 
 MCP does not have a universal “current chat id” field. `agent-resume` derives it from each client’s local state:

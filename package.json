@@ -1,6 +1,6 @@
 {
   "name": "agent-resume-mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "MCP helper that finds and resumes Codex, OpenCode, and Claude Code sessions",
   "type": "module",
   "license": "MIT",
