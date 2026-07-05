@@ -238,3 +238,29 @@ Best local SESSION_ID source:
 ~/.claude/projects/<encoded-cwd>/*.jsonl
   filename stem -> SESSION_ID
 ```
+
+## Tests
+
+Basic syntax/package checks are cheap:
+
+```bash
+python3 -m py_compile agent_resume.py scripts/install-client-configs.py scripts/test-codex-paid-smoke.py
+node --check npm/agent-resume-mcp.js
+npm pack --dry-run
+```
+
+The real Codex MCP `_meta.threadId` smoke test is **paid**, so it is skipped by default:
+
+```bash
+npm run test:codex-paid
+# SKIP: paid Codex smoke test disabled. Set AGENT_RESUME_RUN_PAID_CODEX=1 to run.
+```
+
+Run it explicitly when needed:
+
+```bash
+AGENT_RESUME_RUN_PAID_CODEX=1 AGENT_RESUME_CODEX_MODEL=gpt-5.4-mini npm run test:codex-paid
+```
+
+It asserts that Codex calls `agent_resume.build_resume_command` without `cwd` and without `marker`, that `session_id_source == "mcp_meta"`, `marker == null`, `used_last == false`, and that `command` is the full argv array beginning with `codex exec resume <thread_id>`.
+

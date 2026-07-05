@@ -1,6 +1,6 @@
 {
   "name": "agent-resume-mcp",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "MCP helper that finds and resumes Codex, OpenCode, and Claude Code sessions",
   "type": "module",
   "license": "MIT",
@@ -11,6 +11,10 @@
     "README.md",
     "agent_resume.py",
     "npm/agent-resume-mcp.js",
-    "scripts/install-client-configs.py"
-  ]
+    "scripts/install-client-configs.py",
+    "scripts/test-codex-paid-smoke.py"
+  ],
+  "scripts": {
+    "test:codex-paid": "python3 scripts/test-codex-paid-smoke.py"
+  }
 }

@@ -29,7 +29,7 @@ HOME = Path.home()
 STATE_DIR = Path(os.environ.get("AGENT_RESUME_STATE_DIR", HOME / ".local/state/agent-resume"))
 CONFIG_PATH = Path(os.environ.get("AGENT_RESUME_CONFIG", HOME / ".config/agent-resume/config.json"))
 SERVER_NAME = "agent-resume"
-SERVER_VERSION = "0.1.5"
+SERVER_VERSION = "0.1.6"
 
 
 def now_iso() -> str:
