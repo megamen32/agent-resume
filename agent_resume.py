@@ -11,6 +11,7 @@ The MCP server is NDJSON stdio for simple MCP relays.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -28,7 +29,7 @@ HOME = Path.home()
 STATE_DIR = Path(os.environ.get("AGENT_RESUME_STATE_DIR", HOME / ".local/state/agent-resume"))
 CONFIG_PATH = Path(os.environ.get("AGENT_RESUME_CONFIG", HOME / ".config/agent-resume/config.json"))
 SERVER_NAME = "agent-resume"
-SERVER_VERSION = "0.1.4"
+SERVER_VERSION = "0.1.5"
 
 
 def now_iso() -> str:
@@ -110,6 +111,46 @@ def validate_marker(marker: Any, *, required: bool = False) -> Optional[str]:
 def get_marker(args: Dict[str, Any], *, required: bool = False) -> Optional[str]:
     # run_id is accepted as an old alias, but the expected name is marker.
     return validate_marker(args.get("marker") or args.get("run_id"), required=required)
+
+
+def extract_mcp_session_id(meta: Any) -> Optional[str]:
+    """Extract session/thread id passed by an MCP client in request _meta.
+
+    Codex currently sends the conversation/thread id as _meta.threadId.
+    Keep aliases for compatibility with other clients or future changes.
+    """
+    keys = {"threadId", "thread_id", "sessionId", "session_id", "conversationId", "conversation_id"}
+    seen: set[int] = set()
+
+    def walk(value: Any) -> Optional[str]:
+        if isinstance(value, dict):
+            oid = id(value)
+            if oid in seen:
+                return None
+            seen.add(oid)
+            for k in keys:
+                v = value.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            for v in value.values():
+                found = walk(v)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for v in value:
+                found = walk(v)
+                if found:
+                    return found
+        return None
+
+    return walk(meta)
+
+
+def default_agent_or_none() -> Optional[str]:
+    try:
+        return resolve_agent(None)
+    except Exception:
+        return None
 
 
 def text_has(needle: Optional[str], *values: Any) -> bool:
@@ -419,20 +460,37 @@ def build_resume_command(agent: Optional[str], session_id: Optional[str], cwd: O
 
 def resume_agent(args: Dict[str, Any]) -> Dict[str, Any]:
     agent = resolve_agent(args.get("agent"))
-    cwd = str(safe_cwd(args.get("cwd")))
+    explicit_cwd = args.get("cwd")
+    cwd = str(safe_cwd(explicit_cwd)) if explicit_cwd else str(Path.cwd())
     session_id = args.get("session_id") or args.get("session")
+    mcp_meta = args.get("_mcp_meta") or args.get("_meta") or {}
+    meta_session_id = extract_mcp_session_id(mcp_meta)
+
     if args.get("use_last"):
-        raise ValueError("use_last is unsafe and disabled. Pass explicit session_id or a 5-char marker.")
-    marker = get_marker(args, required=not session_id)
-    called_at_ms = now_ms()
-    query = args.get("query") or args.get("title_query")
+        raise ValueError("use_last is unsafe and disabled")
+
+    if not session_id and agent == "codex" and meta_session_id:
+        session_id = meta_session_id
+
+    marker: Optional[str] = None
     candidates: List[Dict[str, Any]] = []
+
     if not session_id:
+        if not explicit_cwd:
+            raise ValueError(f"cwd is required for {agent} when session_id was not provided by MCP _meta")
+        marker = get_marker(args, required=True)
+        query = args.get("query") or args.get("title_query")
         candidates = find_sessions(agent, cwd, query=query, limit=5, marker=marker)
         if candidates and float(candidates[0].get("score") or 0) >= 100.0:
             session_id = candidates[0]["session_id"]
-    if not session_id:
-        raise ValueError(f"no session matched marker={marker!r} query={query!r} cwd={cwd!r}; refusing to resume")
+        if not session_id:
+            raise ValueError(f"no session matched marker={marker!r} cwd={cwd!r}; refusing to resume")
+    else:
+        # Marker can still be supplied for logs/prompt, but Codex does not need it
+        # because its session id comes through MCP _meta.threadId.
+        marker = validate_marker(args.get("marker"), required=False) if args.get("marker") else None
+
+    called_at_ms = now_ms()
     prompt = args.get("prompt") or default_prompt(args.get("job_id"), args.get("log_file"), args.get("status"), args.get("note"), marker=marker, called_at_ms=called_at_ms)
     cmd = build_resume_command(agent, str(session_id), cwd, str(prompt), use_last=False)
     result: Dict[str, Any] = {
@@ -440,6 +498,7 @@ def resume_agent(args: Dict[str, Any]) -> Dict[str, Any]:
         "agent": agent,
         "cwd": cwd,
         "session_id": session_id,
+        "session_id_source": "mcp_meta" if meta_session_id and meta_session_id == session_id else ("argument" if args.get("session_id") or args.get("session") else "marker_lookup"),
         "marker": marker,
         "called_at_ms": called_at_ms,
         "used_last": False,
@@ -478,7 +537,7 @@ def register(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "record": rec, "registry": str(path)}
 
 
-TOOLS = {
+BASE_TOOLS = {
     "get_config": {
         "description": "Show agent-resume effective config: default agent from env/config and state paths. Use this to verify the MCP server identity; normal calls do not need an agent argument when AGENT_RESUME_AGENT is set.",
         "inputSchema": {"type":"object","properties":{},"additionalProperties":False},
@@ -490,7 +549,7 @@ TOOLS = {
         "handler": lambda a: {"sessions": find_sessions(a.get("agent"), a.get("cwd"), a.get("query"), int(a.get("limit") or 20), a.get("marker"))},
     },
     "build_resume_command": {
-        "description": "Build the command that would resume an agent session. Agent is optional when configured via AGENT_RESUME_AGENT. Dry-run by default; returns shell_command. To prevent waking the wrong chat, marker is required unless session_id is explicit. use_last is disabled. For Codex uses codex exec resume, for OpenCode opencode --session/--continue, for Claude claude --print --resume/--continue.",
+        "description": "Build the command that would resume an agent session. Schema is specialized by AGENT_RESUME_AGENT: Codex uses MCP _meta.threadId/session_id; OpenCode and Claude require cwd + marker. use_last is disabled.",
         "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"prompt":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"query":{"type":["string","null"]},"marker":{"type":["string","null"],"description":"Required unless session_id is explicit. Exactly 5 ASCII alphanumeric chars [A-Za-z0-9]."},"execute":{"type":"boolean","default":False,"description":"If true, start the resume command detached. Default false for safety."}},"required":[],"additionalProperties":True},
         "handler": resume_agent,
     },
@@ -500,6 +559,31 @@ TOOLS = {
         "handler": register,
     },
 }
+
+
+def tools_for_client() -> Dict[str, Dict[str, Any]]:
+    tools = copy.deepcopy(BASE_TOOLS)
+    agent = default_agent_or_none()
+    schema = tools["build_resume_command"]["inputSchema"]
+    props = schema["properties"]
+
+    if agent == "codex":
+        schema["required"] = []
+        props["marker"]["description"] = "Optional for Codex: Codex passes session id as MCP _meta.threadId. Use marker only as fallback/debug."
+        schema["description"] = "Codex: session id is taken from MCP request _meta.threadId; marker is not required. use_last is disabled."
+        tools["build_resume_command"]["description"] = schema["description"]
+    elif agent in {"opencode", "claude"}:
+        schema["required"] = ["cwd", "marker"]
+        props["cwd"]["description"] = "Required for OpenCode/Claude session lookup."
+        props["marker"]["description"] = "Required for OpenCode/Claude. Exactly 5 ASCII alphanumeric chars [A-Za-z0-9]."
+        schema["description"] = f"{agent}: cwd and marker are required; session id is not provided by MCP. use_last is disabled."
+        tools["build_resume_command"]["description"] = schema["description"]
+    else:
+        schema["anyOf"] = [{"required": ["session_id"]}, {"required": ["cwd", "marker"]}]
+        props["marker"]["description"] = "Required with cwd unless session_id is explicit. Exactly 5 ASCII alphanumeric chars [A-Za-z0-9]."
+        schema["description"] = "Generic mode: provide explicit session_id or cwd + marker. Codex client configs normally pass session id via _meta.threadId."
+        tools["build_resume_command"]["description"] = schema["description"]
+    return tools
 
 
 def reply(req_id: Any, result: Any = None, error: Exception | None = None) -> None:
@@ -519,11 +603,14 @@ def handle(req: Dict[str, Any]) -> None:
         if method == "initialize":
             reply(req_id, {"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":SERVER_NAME,"version":SERVER_VERSION}})
         elif method == "tools/list":
-            reply(req_id, {"tools":[{"name":n,"description":t["description"],"inputSchema":t["inputSchema"]} for n,t in TOOLS.items()]})
+            tools = tools_for_client(); reply(req_id, {"tools":[{"name":n,"description":t["description"],"inputSchema":t["inputSchema"]} for n,t in tools.items()]})
         elif method == "tools/call":
-            params=req.get("params") or {}; name=params.get("name"); args=params.get("arguments") or {}
-            if name not in TOOLS: raise ValueError(f"unknown tool: {name}")
-            result=TOOLS[name]["handler"](args)
+            params=req.get("params") or {}; name=params.get("name"); args=dict(params.get("arguments") or {})
+            tools = tools_for_client()
+            if name not in tools: raise ValueError(f"unknown tool: {name}")
+            if isinstance(params.get("_meta"), dict): args["_mcp_meta"] = params.get("_meta")
+            elif isinstance(params.get("meta"), dict): args["_mcp_meta"] = params.get("meta")
+            result=tools[name]["handler"](args)
             reply(req_id, {"content":[{"type":"text","text":json.dumps(result, ensure_ascii=False, indent=2)}],"structuredContent":result})
         elif method and method.startswith("notifications/"):
             return

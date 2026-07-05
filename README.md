@@ -78,20 +78,24 @@ A local fallback also works:
 ```
 
 
-## Correlation `marker`
+## Resume identity and marker rules
 
-Do not rely on “latest session” when a background job finishes. The model should generate a short random marker and put it in the session title/prompt/cwd, then pass the same marker to `agent-resume` later.
+`agent-resume` must not guess “the last session”. It resumes by an explicit current-session identity:
 
-Accepted marker format:
+- **Codex**: Codex sends its thread/session id in MCP request `_meta.threadId`; `agent-resume` reads it and does not require a marker.
+- **OpenCode**: OpenCode does not send session id in MCP tool arguments or `_meta`; `cwd` and `marker` are required.
+- **Claude Code**: Claude Code does not expose a documented session id to MCP tool calls; `cwd` and `marker` are required.
 
-- exactly 5 ASCII alphanumeric chars: `[A-Za-z0-9]{5}`
-- examples: `Q7xK2`, `A9mP4`
+For OpenCode/Claude, the marker is a plain required tool argument, not something `agent-resume` invents:
 
-The model does **not** need to know the time or call another tool for time. The MCP server records `called_at_ms` itself when `build_resume_command` is called.
+```text
+marker = exactly 5 ASCII alphanumeric chars: [A-Za-z0-9]{5}
+example: Q7xK2
+```
 
-`build_resume_command` requires `marker` unless you pass an explicit `session_id`. `use_last` is disabled because it can wake the wrong chat. If no candidate has an exact marker match (`score >= 100`), agent-resume refuses to resume.
+The model should put the same marker in the session title/prompt/cwd when starting the long task, then pass it to `agent-resume` later. The MCP server records `called_at_ms` itself; the model does not need to know the time.
 
-Example:
+Example for OpenCode/Claude-style clients:
 
 ```bash
 MARKER=Q7xK2
@@ -105,6 +109,8 @@ For custom/local OpenCode builds, set `OPENCODE_DISABLE_CHANNEL_DB=true` if you 
 export OPENCODE_DISABLE_CHANNEL_DB=true
 # writes to ~/.local/share/opencode/opencode.db instead of opencode-<channel>.db
 ```
+
+`use_last` is disabled because it can wake the wrong chat.
 
 
 ## Where SESSION_ID comes from
