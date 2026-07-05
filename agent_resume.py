@@ -25,8 +25,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 HOME = Path.home()
 STATE_DIR = Path(os.environ.get("AGENT_RESUME_STATE_DIR", HOME / ".local/state/agent-resume"))
+CONFIG_PATH = Path(os.environ.get("AGENT_RESUME_CONFIG", HOME / ".config/agent-resume/config.json"))
 SERVER_NAME = "agent-resume"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.1.1"
 
 
 def now_iso() -> str:
@@ -47,6 +48,39 @@ def normalize_agent(agent: str) -> str:
     if a not in {"codex", "opencode", "claude"}:
         raise ValueError("agent must be one of: codex, opencode, claude")
     return a
+
+
+def load_config() -> Dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(CONFIG_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def default_agent() -> Optional[str]:
+    for key in ("AGENT_RESUME_AGENT", "MCP_AGENT", "AI_AGENT", "AGENT"):
+        val = os.environ.get(key)
+        if val:
+            return normalize_agent(val)
+    cfg = load_config()
+    val = cfg.get("agent") or cfg.get("default_agent")
+    if val:
+        return normalize_agent(str(val))
+    return None
+
+
+def resolve_agent(agent: Optional[str]) -> str:
+    if agent:
+        return normalize_agent(agent)
+    resolved = default_agent()
+    if resolved:
+        return resolved
+    raise ValueError(
+        "agent is not configured. Set AGENT_RESUME_AGENT=codex|opencode|claude in this MCP server config, "
+        "or pass agent explicitly, or write ~/.config/agent-resume/config.json with {\"agent\":\"codex\"}."
+    )
 
 
 def safe_cwd(cwd: Optional[str]) -> Path:
@@ -72,11 +106,20 @@ def parse_time(value: Any) -> float:
     if value is None:
         return 0.0
     if isinstance(value, (int, float)):
-        # OpenCode stores milliseconds; Unix seconds are smaller.
-        return float(value) / 1000.0 if value > 10_000_000_000 else float(value)
+        # Normalize epoch seconds / milliseconds / microseconds / nanoseconds.
+        v = float(value)
+        if v > 1_000_000_000_000_000_00:  # nanoseconds
+            return v / 1_000_000_000.0
+        if v > 1_000_000_000_000_00:  # microseconds
+            return v / 1_000_000.0
+        if v > 10_000_000_000:  # milliseconds
+            return v / 1000.0
+        return v
     text = str(value).strip()
     if not text:
         return 0.0
+    if text.isdigit():
+        return parse_time(int(text))
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     # Python 3.10 only accepts microseconds; Codex timestamps can have nanoseconds.
@@ -98,25 +141,64 @@ def parse_time(value: Any) -> float:
 
 
 def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None) -> List[SessionCandidate]:
-    path = HOME / ".codex/session_index.jsonl"
+    """Find Codex sessions.
+
+    Preferred source is ~/.codex/state_5.sqlite: threads table has id, cwd,
+    title/preview, rollout_path, model, git metadata, updated_at_ms.
+    Fallback is ~/.codex/session_index.jsonl, which has id/title/time but not cwd.
+    """
     out: List[SessionCandidate] = []
-    if not path.exists():
-        return out
-    for line in path.read_text(errors="replace").splitlines():
+    cwd_s = str(cwd) if cwd else None
+    db = HOME / ".codex/state_5.sqlite"
+    if db.exists():
         try:
-            item = json.loads(line)
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                "select id,cwd,title,preview,first_user_message,rollout_path,updated_at_ms,updated_at,created_at_ms,model,source,thread_source,agent_nickname,agent_role,git_origin_url,git_branch from threads where archived=0 order by updated_at_ms desc limit 500"
+            ).fetchall()
+            con.close()
+            for r in rows:
+                rcwd = r["cwd"] or None
+                title = r["title"] or r["preview"] or r["first_user_message"] or ""
+                score = 0.0
+                if cwd_s and rcwd:
+                    try:
+                        d = str(Path(rcwd).expanduser().resolve())
+                        if d == cwd_s:
+                            score += 30
+                        elif cwd_s.startswith(d.rstrip("/") + "/") or d.startswith(cwd_s.rstrip("/") + "/"):
+                            score += 12
+                    except Exception:
+                        pass
+                if query and query.lower() in title.lower():
+                    score += 10
+                if not r["agent_nickname"]:
+                    score += 1
+                out.append(SessionCandidate(
+                    "codex", r["id"], rcwd, title[:300], parse_time(r["updated_at_ms"] or r["updated_at"]), str(db), score,
+                    {"rollout_path": r["rollout_path"], "model": r["model"], "source": r["source"], "thread_source": r["thread_source"], "agent_nickname": r["agent_nickname"], "agent_role": r["agent_role"], "git_origin_url": r["git_origin_url"], "git_branch": r["git_branch"]}
+                ))
         except Exception:
-            continue
-        sid = item.get("id")
-        if not sid:
-            continue
-        title = item.get("thread_name") or ""
-        updated = item.get("updated_at")
-        score = 0.0
-        if query and query.lower() in title.lower():
-            score += 10
-        ts = parse_time(updated)
-        out.append(SessionCandidate("codex", sid, str(cwd) if cwd else None, title, ts, str(path), score, {"updated_at": updated}))
+            pass
+    if not out:
+        path = HOME / ".codex/session_index.jsonl"
+        if path.exists():
+            for line in path.read_text(errors="replace").splitlines():
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                sid = item.get("id")
+                if not sid:
+                    continue
+                title = item.get("thread_name") or ""
+                updated = item.get("updated_at")
+                score = 0.0
+                if query and query.lower() in title.lower():
+                    score += 10
+                ts = parse_time(updated)
+                out.append(SessionCandidate("codex", sid, str(cwd) if cwd else None, title, ts, str(path), score, {"updated_at": updated}))
     out.sort(key=lambda x: (x.score, x.updated or 0), reverse=True)
     return out[:limit]
 
@@ -233,8 +315,8 @@ def claude_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional
     return out[:limit]
 
 
-def find_sessions(agent: str, cwd: Optional[str] = None, query: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
-    a = normalize_agent(agent)
+def find_sessions(agent: Optional[str] = None, cwd: Optional[str] = None, query: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+    a = resolve_agent(agent)
     p = safe_cwd(cwd) if cwd else None
     if a == "codex":
         rows = codex_sessions(p, limit, query)
@@ -266,8 +348,8 @@ def default_prompt(job_id: Optional[str], log_file: Optional[str], status: Optio
     return "\n".join(parts)
 
 
-def build_resume_command(agent: str, session_id: Optional[str], cwd: Optional[str], prompt: str, use_last: bool = False) -> List[str]:
-    a = normalize_agent(agent)
+def build_resume_command(agent: Optional[str], session_id: Optional[str], cwd: Optional[str], prompt: str, use_last: bool = False) -> List[str]:
+    a = resolve_agent(agent)
     if a == "codex":
         if session_id:
             return ["codex", "exec", "resume", session_id, prompt]
@@ -290,7 +372,7 @@ def build_resume_command(agent: str, session_id: Optional[str], cwd: Optional[st
 
 
 def resume_agent(args: Dict[str, Any]) -> Dict[str, Any]:
-    agent = normalize_agent(str(args.get("agent") or ""))
+    agent = resolve_agent(args.get("agent"))
     cwd = str(safe_cwd(args.get("cwd")))
     session_id = args.get("session_id") or args.get("session")
     query = args.get("query") or args.get("title_query")
@@ -331,7 +413,7 @@ def resume_agent(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def register(args: Dict[str, Any]) -> Dict[str, Any]:
-    agent = normalize_agent(str(args.get("agent") or ""))
+    agent = resolve_agent(args.get("agent"))
     cwd = str(safe_cwd(args.get("cwd")))
     session_id = args.get("session_id") or args.get("session")
     label = args.get("label") or args.get("name") or "default"
@@ -344,19 +426,24 @@ def register(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 TOOLS = {
+    "get_config": {
+        "description": "Show agent-resume effective config: default agent from env/config and state paths. Use this to verify the MCP server identity; normal calls do not need an agent argument when AGENT_RESUME_AGENT is set.",
+        "inputSchema": {"type":"object","properties":{},"additionalProperties":False},
+        "handler": lambda a: {"default_agent": default_agent(), "config_path": str(CONFIG_PATH), "config": load_config(), "env_agent": os.environ.get("AGENT_RESUME_AGENT"), "state_dir": str(STATE_DIR)},
+    },
     "find_sessions": {
-        "description": "Find likely local CLI coding-agent sessions for agent=codex|opencode|claude. Use cwd/title_query to pick the right chat before resuming.",
-        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"],"description":"Project directory to scope session search."},"query":{"type":["string","null"],"description":"Optional title/text query."},"limit":{"type":["integer","null"],"default":20}},"required":["agent"],"additionalProperties":False},
-        "handler": lambda a: {"sessions": find_sessions(str(a.get("agent")), a.get("cwd"), a.get("query"), int(a.get("limit") or 20))},
+        "description": "Find likely local CLI coding-agent sessions. Agent is optional when AGENT_RESUME_AGENT=codex|opencode|claude is set in this MCP server config. Use cwd/query to pick the right chat before resuming.",
+        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"],"description":"Project directory to scope session search."},"query":{"type":["string","null"],"description":"Optional title/text query."},"limit":{"type":["integer","null"],"default":20}},"required":[],"additionalProperties":False},
+        "handler": lambda a: {"sessions": find_sessions(a.get("agent"), a.get("cwd"), a.get("query"), int(a.get("limit") or 20))},
     },
     "build_resume_command": {
-        "description": "Build the command that would resume an agent session. Dry-run by default; returns shell_command. For Codex uses codex exec resume, for OpenCode opencode --session/--continue, for Claude claude --print --resume/--continue.",
-        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"use_last":{"type":"boolean","default":False},"prompt":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"query":{"type":["string","null"]},"execute":{"type":"boolean","default":False,"description":"If true, start the resume command detached. Default false for safety."}},"required":["agent"],"additionalProperties":True},
+        "description": "Build the command that would resume an agent session. Agent is optional when configured via AGENT_RESUME_AGENT. Dry-run by default; returns shell_command. For Codex uses codex exec resume, for OpenCode opencode --session/--continue, for Claude claude --print --resume/--continue.",
+        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"use_last":{"type":"boolean","default":False},"prompt":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"query":{"type":["string","null"]},"execute":{"type":"boolean","default":False,"description":"If true, start the resume command detached. Default false for safety."}},"required":[],"additionalProperties":True},
         "handler": resume_agent,
     },
     "register_agent": {
-        "description": "Record that the current AI client identifies as agent=codex|opencode|claude with optional session_id/cwd. This helps later wake/resume logic.",
-        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"label":{"type":["string","null"]},"metadata":{"type":["object","null"]}},"required":["agent"],"additionalProperties":True},
+        "description": "Optional manual registration of current client/session. Normally agent identity should be configured once through AGENT_RESUME_AGENT in the MCP config, not passed on every call.",
+        "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"label":{"type":["string","null"]},"metadata":{"type":["object","null"]}},"required":[],"additionalProperties":True},
         "handler": register,
     },
 }
@@ -406,9 +493,9 @@ def cli_main() -> None:
     ap=argparse.ArgumentParser(description="Find and resume local CLI coding-agent sessions")
     sub=ap.add_subparsers(dest="cmd", required=True)
     f=sub.add_parser("find")
-    f.add_argument("--agent", required=True, choices=["codex","opencode","claude"]); f.add_argument("--cwd"); f.add_argument("--query"); f.add_argument("--limit", type=int, default=20)
+    f.add_argument("--agent", choices=["codex","opencode","claude"], help="Defaults to AGENT_RESUME_AGENT/config.json"); f.add_argument("--cwd"); f.add_argument("--query"); f.add_argument("--limit", type=int, default=20)
     r=sub.add_parser("resume")
-    r.add_argument("--agent", required=True, choices=["codex","opencode","claude"]); r.add_argument("--cwd"); r.add_argument("--session-id"); r.add_argument("--use-last", action="store_true"); r.add_argument("--prompt"); r.add_argument("--job-id"); r.add_argument("--log-file"); r.add_argument("--note"); r.add_argument("--query"); r.add_argument("--execute", action="store_true")
+    r.add_argument("--agent", choices=["codex","opencode","claude"], help="Defaults to AGENT_RESUME_AGENT/config.json"); r.add_argument("--cwd"); r.add_argument("--session-id"); r.add_argument("--use-last", action="store_true"); r.add_argument("--prompt"); r.add_argument("--job-id"); r.add_argument("--log-file"); r.add_argument("--note"); r.add_argument("--query"); r.add_argument("--execute", action="store_true")
     sub.add_parser("mcp")
     args=ap.parse_args()
     if args.cmd == "mcp": mcp_main(); return
