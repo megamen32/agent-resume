@@ -68,6 +68,35 @@ class SessionCandidate:
     extra: Optional[Dict[str, Any]] = None
 
 
+def parse_time(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        # OpenCode stores milliseconds; Unix seconds are smaller.
+        return float(value) / 1000.0 if value > 10_000_000_000 else float(value)
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    # Python 3.10 only accepts microseconds; Codex timestamps can have nanoseconds.
+    if "." in text:
+        head, tail = text.split(".", 1)
+        tz = ""
+        for sep in ("+", "-"):
+            if sep in tail:
+                frac, rest = tail.split(sep, 1)
+                tz = sep + rest
+                break
+        else:
+            frac = tail
+        text = head + "." + frac[:6].ljust(6, "0") + tz
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except Exception:
+        return 0.0
+
+
 def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None) -> List[SessionCandidate]:
     path = HOME / ".codex/session_index.jsonl"
     out: List[SessionCandidate] = []
@@ -86,10 +115,7 @@ def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[
         score = 0.0
         if query and query.lower() in title.lower():
             score += 10
-        try:
-            ts = datetime.fromisoformat(str(updated).replace("Z", "+00:00")).timestamp()
-        except Exception:
-            ts = 0.0
+        ts = parse_time(updated)
         out.append(SessionCandidate("codex", sid, str(cwd) if cwd else None, title, ts, str(path), score, {"updated_at": updated}))
     out.sort(key=lambda x: (x.score, x.updated or 0), reverse=True)
     return out[:limit]
@@ -148,7 +174,7 @@ def opencode_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Option
                     r["id"],
                     directory,
                     title,
-                    (r["time_updated"] or 0) / 1000.0,
+                    parse_time(r["time_updated"]),
                     str(db),
                     score,
                     {"path": pathval, "agent": r["agent"], "model": r["model"], "parent_id": r["parent_id"]},
