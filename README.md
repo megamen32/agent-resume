@@ -78,21 +78,25 @@ A local fallback also works:
 ```
 
 
-## Correlation `run_id`
+## Correlation `marker`
 
-Do not rely on “latest session” when a background job finishes. Pass a unique `run_id` into the session title/prompt/cwd and into `agent-resume`:
+Do not rely on “latest session” when a background job finishes. The model should generate a short random marker and put it in the session title/prompt/cwd, then pass the same marker to `agent-resume` later.
 
-- 13-digit epoch milliseconds, for example `1783217856841`
-- or UUID4, for example `4b8d8e62-cc95-4c4b-9c06-1f9b15c7c1c2`
+Accepted marker format:
 
-`build_resume_command` now requires `run_id` unless you pass an explicit `session_id` or `use_last=true`. If no candidate has an exact `run_id` match, it refuses to fall back to `--last`. This prevents waking the wrong chat.
+- exactly 5 ASCII alphanumeric chars: `[A-Za-z0-9]{5}`
+- examples: `Q7xK2`, `A9mP4`
+
+The model does **not** need to know the time or call another tool for time. The MCP server records `called_at_ms` itself when `build_resume_command` is called.
+
+`build_resume_command` requires `marker` unless you pass an explicit `session_id`. `use_last` is disabled because it can wake the wrong chat. If no candidate has an exact marker match (`score >= 100`), agent-resume refuses to resume.
 
 Example:
 
 ```bash
-RUN_ID=$(date +%s%3N)
-opencode run --title "$RUN_ID" "Do the task. Marker: $RUN_ID"
-AGENT_RESUME_AGENT=opencode ./agent_resume.py resume --cwd "$PWD" --run-id "$RUN_ID" --job-id job-123 --log-file /tmp/job.log
+MARKER=Q7xK2
+opencode run --title "agent-resume-$MARKER" "Do the task. Marker: $MARKER"
+AGENT_RESUME_AGENT=opencode ./agent_resume.py resume --cwd "$PWD" --marker "$MARKER" --job-id job-123 --log-file /tmp/job.log
 ```
 
 For custom/local OpenCode builds, set `OPENCODE_DISABLE_CHANNEL_DB=true` if you want all sessions in the standard database:
@@ -101,6 +105,7 @@ For custom/local OpenCode builds, set `OPENCODE_DISABLE_CHANNEL_DB=true` if you 
 export OPENCODE_DISABLE_CHANNEL_DB=true
 # writes to ~/.local/share/opencode/opencode.db instead of opencode-<channel>.db
 ```
+
 
 ## Where SESSION_ID comes from
 
