@@ -10,6 +10,24 @@ It is meant to be paired with long-running job watchers such as `notify-mcp`: in
 - OpenCode: `opencode --session <SESSION_ID> --prompt "prompt"` or `opencode --continue --prompt "prompt"`
 - Claude Code: `claude --print --resume <SESSION_ID> "prompt"` or `claude --print --continue "prompt"`
 
+
+## Install into clients automatically
+
+Run the installer to write ready-to-use MCP config entries for all supported clients:
+
+```bash
+npx -y github:megamen32/agent-resume --help
+python3 scripts/install-client-configs.py codex opencode claude
+```
+
+The installer sets client identity once in each MCP config:
+
+- Codex: `env = { "AGENT_RESUME_AGENT" = "codex" }` in `~/.codex/config.toml`
+- OpenCode: `environment.AGENT_RESUME_AGENT = "opencode"` in `~/.config/opencode/opencode.jsonc`
+- Claude Code: `env.AGENT_RESUME_AGENT = "claude"` in `~/.claude.json`
+
+After that, tools can be called without passing `agent`.
+
 ## Agent identity
 
 Do **not** make the model pass `agent=codex|opencode|claude` on every tool call. Configure identity once in the MCP client config:
