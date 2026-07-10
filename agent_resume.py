@@ -32,6 +32,16 @@ CONFIG_PATH = Path(os.environ.get("AGENT_RESUME_CONFIG", HOME / ".config/agent-r
 SERVER_NAME = "agent-resume"
 SERVER_VERSION = "0.1.7"
 
+# Privacy opt-out: when set to "0", skip scanning agent message bodies
+# (opencode part.data, codex rollout files, claude jsonl transcripts) and
+# only match the marker against metadata (session title/directory/path).
+# Useful for users who do not want agent-resume to read message content.
+SCAN_MESSAGE_BODIES = os.environ.get("AGENT_RESUME_SCAN_MESSAGE_BODIES", "1") != "0"
+
+# Schema-probe cache: log a one-time warning per opencode DB whose schema
+# lacks every body-bearing table. Avoids spamming stderr on repeated runs.
+_WARNED_SCHEMA_DBS: set[str] = set()
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -227,6 +237,39 @@ def parse_time(value: Any) -> float:
         return 0.0
 
 
+def _codex_marker_in_body(rollout_path: Path, marker: str) -> bool:
+    """Return True if `marker` appears in any assistant message body of a codex rollout.
+
+    Stream-parses the JSONL so we never load the whole file into memory, and
+    short-circuits on first match. Codex rollouts use response_item lines with
+    payload.type='message' and payload.role='assistant'; text lives in
+    payload.content[i].text. Errors are swallowed — a corrupt rollout must
+    not crash the listing.
+    """
+    try:
+        with rollout_path.open("r", errors="replace") as f:
+            for line in f:
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if item.get("type") != "response_item":
+                    continue
+                payload = item.get("payload") or {}
+                if payload.get("type") != "message" or payload.get("role") != "assistant":
+                    continue
+                content = payload.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and isinstance(part.get("text"), str) and marker in part["text"]:
+                            return True
+                elif isinstance(content, str) and marker in content:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None, marker: Optional[str] = None) -> List[SessionCandidate]:
     """Find Codex sessions.
 
@@ -245,7 +288,25 @@ def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[
                 "select id,cwd,title,preview,first_user_message,rollout_path,updated_at_ms,updated_at,created_at_ms,model,source,thread_source,agent_nickname,agent_role,git_origin_url,git_branch from threads where archived=0 order by updated_at_ms desc limit 500"
             ).fetchall()
             con.close()
+            # Body-scan parity with opencode: walk rollout_path files for the
+            # top ~200 candidates and check if the marker appears in an
+            # assistant response. session_index.jsonl has no body to scan.
+            marker_msg_sessions: set[str] = set()
+            if marker and SCAN_MESSAGE_BODIES:
+                for r in rows[:200]:
+                    sid = r["id"]
+                    if sid in marker_msg_sessions:
+                        continue
+                    rollout = r["rollout_path"]
+                    if not rollout:
+                        continue
+                    rp = Path(rollout).expanduser()
+                    if not rp.exists():
+                        continue
+                    if _codex_marker_in_body(rp, marker):
+                        marker_msg_sessions.add(sid)
             for r in rows:
+                sid = r["id"]
                 rcwd = r["cwd"] or None
                 title = r["title"] or r["preview"] or r["first_user_message"] or ""
                 score = 0.0
@@ -258,11 +319,15 @@ def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[
                             score += 12
                     except Exception:
                         pass
-                score += match_score(query, marker, title, rcwd, r["rollout_path"], r["git_branch"])
+                # marker=None here so the marker boost is NOT applied twice;
+                # we apply it once below, covering both metadata and body.
+                score += match_score(query, None, title, rcwd, r["rollout_path"], r["git_branch"])
+                if marker and (sid in marker_msg_sessions or text_has(marker, title, rcwd, r["rollout_path"], r["git_branch"])):
+                    score += 100.0
                 if not r["agent_nickname"]:
                     score += 1
                 out.append(SessionCandidate(
-                    "codex", r["id"], rcwd, title[:300], parse_time(r["updated_at_ms"] or r["updated_at"]), str(db), score,
+                    "codex", sid, rcwd, title[:300], parse_time(r["updated_at_ms"] or r["updated_at"]), str(db), score,
                     {"rollout_path": r["rollout_path"], "model": r["model"], "source": r["source"], "thread_source": r["thread_source"], "agent_nickname": r["agent_nickname"], "agent_role": r["agent_role"], "git_origin_url": r["git_origin_url"], "git_branch": r["git_branch"]}
                 ))
         except Exception:
@@ -281,7 +346,10 @@ def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[
                 title = item.get("thread_name") or ""
                 updated = item.get("updated_at")
                 score = 0.0
-                score += match_score(query, marker, title, str(cwd) if cwd else None)
+                # session_index.jsonl has no rollout file to scan; metadata only.
+                score += match_score(query, None, title, str(cwd) if cwd else None)
+                if marker and text_has(marker, title):
+                    score += 100.0
                 ts = parse_time(updated)
                 out.append(SessionCandidate("codex", sid, str(cwd) if cwd else None, title, ts, str(path), score, {"updated_at": updated}))
     out.sort(key=lambda x: (x.score, x.updated or 0), reverse=True)
@@ -301,12 +369,95 @@ def opencode_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Option
     for db in dbs:
         if not db.exists():
             continue
+        rows: List[sqlite3.Row] = []
+        marker_msg_sessions: set[str] = set()
         try:
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
             con.row_factory = sqlite3.Row
             rows = con.execute(
                 "select id,title,directory,path,agent,model,time_updated,time_created,parent_id from session where time_archived is null order by time_updated desc limit 200"
             ).fetchall()
+            # Body-scan: find sessions whose user/assistant text parts
+            # contain the marker. The marker is typically invented by the
+            # model itself and emitted into the model's own assistant text
+            # response (e.g. "Marker: A7kQ2 — starting work on X"), not
+            # the user's prompt, so we scan BOTH user and assistant roles.
+            # Actual text content lives in the `part` table (message.data
+            # is just metadata like role/agent/summary). Filters:
+            #   - role IN ('user','assistant')  — real messages, not metadata
+            #   - part.type='text'              — excludes reasoning, tool,
+            #                                     step-start, step-finish,
+            #                                     file, agent, subtask, and
+            #                                     compaction parts (compaction
+            #                                     summaries have their own
+            #                                     part.type and must not be
+            #                                     treated as text)
+            #   - synthetic IS NULL OR 0        — excludes system-injected
+            #                                     text parts (skill triggers,
+            #                                     JSON-format prompts)
+            #   - instr(data, ?) > 0            — substring scan
+            #
+            # Performance: this stays cheap because the indexed
+            # `part.session_id IN (...)` clause restricts the scan to
+            # candidate sessions only; `instr()` then runs as a substring
+            # scan over the filtered text-part JSON blobs. We never pull
+            # the raw JSON into Python memory.
+            if marker and rows and SCAN_MESSAGE_BODIES:
+                session_ids = [r["id"] for r in rows]
+                placeholders = ",".join("?" * len(session_ids))
+                tables = {row[0] for row in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('part','message','session_message')"
+                )}
+                # Legacy schema: part+message JOIN.
+                if "part" in tables and "message" in tables:
+                    marker_msg_sessions = {
+                        row[0]
+                        for row in con.execute(
+                            f"SELECT DISTINCT p.session_id FROM part p "
+                            f"JOIN message m ON m.id = p.message_id "
+                            f"WHERE p.session_id IN ({placeholders}) "
+                            f"AND json_extract(m.data, '$.role') IN ('user', 'assistant') "
+                            f"AND json_extract(p.data, '$.type') = 'text' "
+                            f"AND (json_extract(p.data, '$.synthetic') IS NULL "
+                            f"     OR json_extract(p.data, '$.synthetic') = 0) "
+                            f"AND instr(p.data, ?) > 0 "
+                            f"LIMIT 1000",
+                            (*session_ids, marker),
+                        ).fetchall()
+                    }
+                # Forward-compatible schema: session_message is the
+                # projection table opencode is migrating toward
+                # (schema.gen.ts). In current builds it only carries
+                # agent-switched/model-switched events, so this scan is a
+                # no-op; once user/assistant rows start landing here, this
+                # becomes the primary path.
+                if "session_message" in tables:
+                    try:
+                        for row in con.execute(
+                            f"SELECT DISTINCT session_id FROM session_message "
+                            f"WHERE session_id IN ({placeholders}) "
+                            f"AND type IN ('user', 'assistant') "
+                            f"AND (json_extract(data, '$.synthetic') IS NULL "
+                            f"     OR json_extract(data, '$.synthetic') = 0) "
+                            f"AND instr(data, ?) > 0 "
+                            f"LIMIT 1000",
+                            (*session_ids, marker),
+                        ).fetchall():
+                            marker_msg_sessions.add(row[0])
+                    except sqlite3.OperationalError:
+                        # Older builds without `type` as a real column or
+                        # without `synthetic`; the JOIN path above is the
+                        # fallback.
+                        pass
+                if "part" not in tables and "message" not in tables and "session_message" not in tables:
+                    if str(db) not in _WARNED_SCHEMA_DBS:
+                        _WARNED_SCHEMA_DBS.add(str(db))
+                        print(
+                            f"agent-resume: opencode DB has none of part/message/session_message; "
+                            f"marker body-scan disabled for {db}",
+                            file=sys.stderr,
+                        )
         except Exception:
             continue
         finally:
@@ -330,7 +481,15 @@ def opencode_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Option
                     pass
             if cwd_s and pathval and pathval.strip("/") in cwd_s.strip("/"):
                 score += 5
-            score += match_score(query, marker, title, directory, pathval)
+            # marker=None here so the marker boost is NOT applied twice;
+            # we apply it once below, covering both metadata (title/
+            # directory/path) and body matches.
+            score += match_score(query, None, title, directory, pathval)
+            # Marker contributes +100 at most once across all surfaces
+            # (metadata + body). Title/directory/path and the message body
+            # share the same boost slot — we don't want both to stack.
+            if marker and (r["id"] in marker_msg_sessions or text_has(marker, title, directory, pathval)):
+                score += 100.0
             # prefer root sessions by default
             if not r["parent_id"]:
                 score += 1
@@ -355,6 +514,37 @@ def claude_project_dir(cwd: Path) -> Path:
     return HOME / ".claude/projects" / str(cwd).replace("/", "-")
 
 
+def _claude_marker_in_body(jsonl_path: Path, marker: str) -> bool:
+    """Return True if `marker` appears in any assistant text part of a claude transcript.
+
+    Stream-parses the JSONL so we never load the whole file into memory, and
+    short-circuits on first match. Claude project transcripts have lines
+    with message.role='user'|'assistant' and message.content as a list of
+    parts; the text parts have type='text' with a 'text' field. Errors are
+    swallowed — a corrupt transcript must not crash the listing.
+    """
+    try:
+        with jsonl_path.open("r", errors="replace") as f:
+            for line in f:
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                msg = item.get("message") or {}
+                if msg.get("role") != "assistant":
+                    continue
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str) and marker in part["text"]:
+                            return True
+                elif isinstance(content, str) and marker in content:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def claude_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None, marker: Optional[str] = None) -> List[SessionCandidate]:
     roots: List[Path] = []
     if cwd:
@@ -362,13 +552,15 @@ def claude_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional
     all_root = HOME / ".claude/projects"
     if all_root.exists():
         roots.extend([p for p in all_root.iterdir() if p.is_dir() and p not in roots])
-    out: List[SessionCandidate] = []
+    # First pass: collect candidate (file, sid, title) tuples. Sort by mtime
+    # so the body scan below operates on the freshest ~200 transcripts.
+    candidates: List[Tuple[Path, str, Optional[str]]] = []
     for root in roots:
         for f in root.glob("*.jsonl"):
             sid = f.stem
             title = None
             try:
-                # Read first/last few lines without loading huge files where possible.
+                # Read first few lines without loading huge files where possible.
                 lines = f.read_text(errors="replace").splitlines()
                 for line in lines[:20]:
                     try:
@@ -389,11 +581,26 @@ def claude_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional
                             break
             except Exception:
                 pass
-            score = 0.0
-            if cwd and root == claude_project_dir(cwd):
-                score += 20
-            score += match_score(query, marker, title, path.name, str(f))
-            out.append(SessionCandidate("claude", sid, str(cwd) if cwd else None, title, f.stat().st_mtime, str(f), score))
+            candidates.append((f, sid, title))
+    candidates.sort(key=lambda x: x[0].stat().st_mtime, reverse=True)
+    # Body-scan parity with opencode/codex: stream each top-200 transcript
+    # to detect marker-bearing assistant text. Bound the IO at 200 files.
+    marker_msg_sessions: set[str] = set()
+    if marker and SCAN_MESSAGE_BODIES:
+        for f, sid, _ in candidates[:200]:
+            if _claude_marker_in_body(f, marker):
+                marker_msg_sessions.add(sid)
+    out: List[SessionCandidate] = []
+    for f, sid, title in candidates:
+        score = 0.0
+        if cwd and f.parent == claude_project_dir(cwd):
+            score += 20
+        # marker=None here so the marker boost is NOT applied twice;
+        # we apply it once below, covering both metadata and body.
+        score += match_score(query, None, title, f.name, str(f))
+        if marker and (sid in marker_msg_sessions or text_has(marker, title, f.name, str(f))):
+            score += 100.0
+        out.append(SessionCandidate("claude", sid, str(cwd) if cwd else None, title, f.stat().st_mtime, str(f), score))
     out.sort(key=lambda x: (x.score, x.updated or 0), reverse=True)
     return out[:limit]
 
