@@ -88,7 +88,10 @@ MCP tools:
 - `attach_pid_and_resume` — watch an existing PID and resume when it exits.
 - `attach_query_and_resume` — find a process by command substring, watch it, then resume.
 - `wait_and_resume` — wait a fixed duration, then resume.
-- `wait_job_status` — inspect the background wait job state.
+- `wait_job_status` — inspect the background wait job state. `watcher_alive`
+  reports whether the detached watcher is still armed; legacy `alive` and
+  `watched_pid_alive` describe only a watched command/PID (and are false for a
+  timer by design).
 
 Default behavior is `execute_resume=true`: when the watched process/timer finishes, the watcher launches the appropriate resume command in the background. Set `execute_resume=false` only for tests.
 

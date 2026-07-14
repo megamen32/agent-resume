@@ -768,6 +768,7 @@ def tool_wait_and_resume(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def tool_wait_job_status(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Return persisted job state and separate watcher/process liveness."""
     job_id = str(args.get("job_id") or "").strip()
     if not job_id:
         raise ValueError("job_id is required")
@@ -776,7 +777,14 @@ def tool_wait_job_status(args: Dict[str, Any]) -> Dict[str, Any]:
         raise FileNotFoundError(f"job not found: {job_id}")
     data = read_json(meta)
     pid = data.get("pid")
-    data["alive"] = bool(pid and is_pid_alive(int(pid)))
+    watched_pid_alive = bool(pid and is_pid_alive(int(pid)))
+    # Keep ``alive`` for existing command/PID clients.  Timers have no watched
+    # PID, so callers must use watcher_alive to tell whether their wait remains
+    # armed instead of misreading the legacy field as timer health.
+    data["alive"] = watched_pid_alive
+    data["watched_pid_alive"] = watched_pid_alive
+    watcher_pid = data.get("watcher_pid")
+    data["watcher_alive"] = bool(watcher_pid and is_pid_alive(int(watcher_pid)))
     return data
 
 
