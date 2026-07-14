@@ -70,14 +70,13 @@ changing this workflow or using it in an unfamiliar environment.
 
 ## AgentHerder boundary
 
-Use AgentHerder only as a best-effort observer of existing work. Its current
-Codex adapter does not provide a reliable delayed resume: it launches a new
-`codex --full-auto` process and reads legacy session files rather than invoking
-`codex exec resume` for the original session. It must not be treated as this
-skill's scheduler or recovery mechanism. A 2026-07-14 local smoke test found
-active Codex processes but `listSessions()` returned zero because the adapter
-scans `~/.codex/sessions/*.json`, while the installed Codex uses
-`session_index.jsonl` and JSONL rollout data.
+AgentHerder may observe a current Codex session and send it a message after the
+2026-07-14 adapter fix: it reads `session_index.jsonl` plus rollout metadata
+and uses `codex exec resume --model <persisted-model>` for the original thread.
+It is still not this skill's scheduler or recovery mechanism: it has no timer,
+durable queue, reboot recovery, or overlap protection. Use AgentResume for the
+one-shot delay and use AgentHerder only for deliberate observation or operator
+initiated follow-up.
 
 ## Minimal model probe
 
