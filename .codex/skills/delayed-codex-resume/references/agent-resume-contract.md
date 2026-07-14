@@ -41,4 +41,7 @@ with an idempotent workload and operational ownership.
 
 AgentHerder is also not a substitute at present: its Codex adapter starts a new
 CLI process instead of resuming the frozen session and assumes a legacy session
-storage layout.
+storage layout. In a local 2026-07-14 smoke test, the adapter returned no
+sessions despite active Codex processes, because it scans
+`~/.codex/sessions/*.json`; current Codex state is indexed via
+`~/.codex/session_index.jsonl` and JSONL rollout data.

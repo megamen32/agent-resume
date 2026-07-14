@@ -72,7 +72,10 @@ Use AgentHerder only as a best-effort observer of existing work. Its current
 Codex adapter does not provide a reliable delayed resume: it launches a new
 `codex --full-auto` process and reads legacy session files rather than invoking
 `codex exec resume` for the original session. It must not be treated as this
-skill's scheduler or recovery mechanism.
+skill's scheduler or recovery mechanism. A 2026-07-14 local smoke test found
+active Codex processes but `listSessions()` returned zero because the adapter
+scans `~/.codex/sessions/*.json`, while the installed Codex uses
+`session_index.jsonl` and JSONL rollout data.
 
 ## Minimal model probe
 
