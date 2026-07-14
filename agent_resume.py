@@ -287,6 +287,29 @@ def codex_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[
     return out[:limit]
 
 
+def codex_session_model(session_id: str) -> str:
+    """Return the model persisted for a Codex thread.
+
+    A resumed Codex invocation otherwise inherits the *current* CLI default,
+    which can silently differ from the model that created the thread.  A
+    one-shot callback must freeze this value with the thread id so its cost and
+    behavior do not change while it waits.
+    """
+    db = HOME / ".codex/state_5.sqlite"
+    if not db.exists():
+        raise ValueError(f"cannot freeze Codex model: state database is missing: {db}")
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        row = con.execute("select model from threads where id = ? and archived = 0", (session_id,)).fetchone()
+        con.close()
+    except sqlite3.Error as e:
+        raise ValueError(f"cannot freeze Codex model for session {session_id}: {e}") from e
+    model = str(row[0] or "").strip() if row else ""
+    if not model:
+        raise ValueError(f"cannot freeze Codex model: session {session_id} has no active model record")
+    return model
+
+
 def opencode_sessions(cwd: Optional[Path] = None, limit: int = 20, query: Optional[str] = None, marker: Optional[str] = None) -> List[SessionCandidate]:
     dbs = [
         HOME / ".local/share/opencode/opencode.db",
@@ -435,11 +458,14 @@ def default_prompt(job_id: Optional[str], log_file: Optional[str], status: Optio
     return "\n".join(parts)
 
 
-def build_resume_command(agent: Optional[str], session_id: Optional[str], cwd: Optional[str], prompt: str, use_last: bool = False) -> List[str]:
+def build_resume_command(agent: Optional[str], session_id: Optional[str], cwd: Optional[str], prompt: str, use_last: bool = False, model: Optional[str] = None) -> List[str]:
     a = resolve_agent(agent)
     if a == "codex":
         if session_id:
-            return ["codex", "exec", "resume", session_id, prompt]
+            cmd = ["codex", "exec", "resume"]
+            if model:
+                cmd.extend(["--model", model])
+            return [*cmd, session_id, prompt]
         if use_last:
             raise ValueError("use_last is unsafe and disabled")
         raise ValueError("codex resume requires session_id")
@@ -492,13 +518,16 @@ def resume_agent(args: Dict[str, Any]) -> Dict[str, Any]:
 
     called_at_ms = now_ms()
     prompt = args.get("prompt") or default_prompt(args.get("job_id"), args.get("log_file"), args.get("status"), args.get("note"), marker=marker, called_at_ms=called_at_ms)
-    cmd = build_resume_command(agent, str(session_id), cwd, str(prompt), use_last=False)
+    frozen_model = args.get("_frozen_model")
+    model = str(frozen_model).strip() if frozen_model else (codex_session_model(str(session_id)) if agent == "codex" else None)
+    cmd = build_resume_command(agent, str(session_id), cwd, str(prompt), use_last=False, model=model)
     result: Dict[str, Any] = {
         "ok": True,
         "agent": agent,
         "cwd": cwd,
         "session_id": session_id,
         "session_id_source": "mcp_meta" if meta_session_id and meta_session_id == session_id else ("argument" if args.get("session_id") or args.get("session") else "marker_lookup"),
+        "model": model,
         "marker": marker,
         "called_at_ms": called_at_ms,
         "used_last": False,
@@ -616,6 +645,7 @@ def freeze_resume_target(args: Dict[str, Any]) -> Dict[str, Any]:
         "cwd": frozen["cwd"],
         "session_id": frozen["session_id"],
         "session_id_source": frozen.get("session_id_source"),
+        "model": frozen.get("model"),
         "marker": frozen.get("marker"),
     }
 
@@ -785,6 +815,7 @@ def watcher_main(meta_path: str) -> int:
             "agent": resume.get("agent"),
             "cwd": resume.get("cwd") or meta.get("cwd"),
             "session_id": resume.get("session_id"),
+            "_frozen_model": resume.get("model"),
             "job_id": meta.get("job_id"),
             "log_file": meta.get("log_file"),
             "note": " ".join(note_parts),

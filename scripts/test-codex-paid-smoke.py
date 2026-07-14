@@ -146,7 +146,9 @@ def main() -> int:
         "marker_is_null": structured.get("marker") is None,
         "used_last_false": structured.get("used_last") is False,
         "command_is_full_argv": isinstance(command, list) and len(command) >= 5,
-        "command_prefix": isinstance(command, list) and command[:4] == ["codex", "exec", "resume", thread_id],
+        "command_prefix": isinstance(command, list) and command[:3] == ["codex", "exec", "resume"],
+        "command_model_flag": isinstance(command, list) and command[3:5] == ["--model", structured.get("model")],
+        "command_thread_id": isinstance(command, list) and command[5:6] == [thread_id],
     }
     failed = [name for name, ok in checks.items() if not ok]
     if failed:
@@ -154,12 +156,12 @@ def main() -> int:
 
     summary = {
         "ok": True,
-        "model": model,
         "thread_id": thread_id,
         "session_id_source": structured.get("session_id_source"),
         "marker": structured.get("marker"),
         "used_last": structured.get("used_last"),
-        "command_prefix": command[:4],
+        "model": structured.get("model"),
+        "command_prefix": command[:6],
         "command_len": len(command),
         "tmp": str(tmp),
     }

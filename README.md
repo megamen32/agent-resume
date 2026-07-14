@@ -297,5 +297,4 @@ Run it explicitly when needed:
 AGENT_RESUME_RUN_PAID_CODEX=1 AGENT_RESUME_CODEX_MODEL=gpt-5.4-mini npm run test:codex-paid
 ```
 
-It asserts that Codex calls `agent_resume.build_resume_command` without `cwd` and without `marker`, that `session_id_source == "mcp_meta"`, `marker == null`, `used_last == false`, and that `command` is the full argv array beginning with `codex exec resume <thread_id>`.
-
+It asserts that Codex calls `agent_resume.build_resume_command` without `cwd` and without `marker`, that `session_id_source == "mcp_meta"`, `marker == null`, `used_last == false`, and that the full argv array begins with `codex exec resume --model <persisted-model> <thread-id>`.

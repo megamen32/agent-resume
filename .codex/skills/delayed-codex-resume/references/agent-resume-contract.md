@@ -7,18 +7,19 @@ a job below `~/.local/state/agent-resume/jobs/<job-id>/`, and starts a detached
 watcher. When the timer expires, the watcher launches:
 
 ```text
-codex exec resume <frozen-session-id> <note>
+codex exec resume --model <frozen-model> <frozen-session-id> <note>
 ```
 
-The resumed process belongs to the original session. The model is therefore
-chosen at initial session creation, not at callback time.
+The resumed process belongs to the original session. AgentResume freezes the
+model persisted for that session at scheduling time and passes it explicitly,
+so a later CLI-default change cannot silently select a different model.
 
 ## Evidence to inspect
 
 For a completed one-shot job, inspect:
 
 - `meta.json` for the target, requested delay, `state: "finished"`, and
-  `resume_result` launch metadata;
+  `resume_result` launch metadata, including the frozen `model`;
 - the `resume_result.log_file` path (normally below
   `~/.local/state/agent-resume/runs/`) for the resumed Codex output;
 - the initial and resumed Codex outputs for the intended response.

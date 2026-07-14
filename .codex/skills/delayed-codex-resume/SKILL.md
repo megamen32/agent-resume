@@ -15,8 +15,9 @@ not a durable job system.
 - The request authorizes a one-shot callback and its cost.
 - The dedicated session has the `agent_resume` MCP tool configured; otherwise it
   cannot schedule its own continuation.
-- Choose the model when starting the session. `AgentResume` resumes that same
-  session and cannot switch its model later.
+- Choose the model when starting the session. `AgentResume` freezes that model
+  from the current Codex state together with the thread id and passes it to
+  `codex exec resume`; it must not silently inherit a later CLI default.
 - Probe a requested model with a tiny `codex exec --ephemeral -m <model>` call
   before relying on it. If unavailable, report the exact error; never silently
   substitute a different model.
@@ -47,7 +48,8 @@ changing this workflow or using it in an unfamiliar environment.
 
    - `agent_resume.wait_job_status` reports `state: "finished"`;
    - its `meta.json` records `resume_result.executed: true`, a zero
-     `launch_returncode`, and `resume_result.log_file`;
+     `launch_returncode`, `resume_result.model` equal to the initial model, and
+     `resume_result.log_file`;
    - `resume_result.log_file` contains the expected response. If a resume PID
      is recorded, it is no longer alive before declaring the test complete.
 5. Report elapsed time, selected model, job id, and the exact evidence. A zero
