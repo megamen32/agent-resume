@@ -1,0 +1,4 @@
+interface:
+  display_name: "Delayed Codex Resume"
+  short_description: "Run safe one-shot Codex callbacks"
+  default_prompt: "Use $delayed-codex-resume to schedule and verify a one-shot delayed Codex continuation."
