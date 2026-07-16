@@ -280,7 +280,7 @@ Fallback:
 OpenCode source was checked from local fork:
 
 ```text
-/home/roomhacker/.config/opencode/apps/forks/opencode
+/home/roomhacker/agents-projects/apps/forks/opencode
 ```
 
 Important files:
