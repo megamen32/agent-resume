@@ -1,20 +1,25 @@
 {
   "name": "agent-resume-mcp",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "MCP helper that finds and resumes Codex, OpenCode, and Claude Code sessions",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "agent-resume-mcp": "npm/agent-resume-mcp.js"
+    "agent-resume-mcp": "npm/agent-resume-mcp.js",
+    "agent-resume-install-retrospective": "scripts/install-long-task-retrospective.py"
   },
   "files": [
     "README.md",
     "agent_resume.py",
     "npm/agent-resume-mcp.js",
+    "skills/long-task-retrospective/SKILL.md",
     "scripts/install-client-configs.py",
-    "scripts/test-codex-paid-smoke.py"
+    "scripts/install-long-task-retrospective.py",
+    "scripts/test-codex-paid-smoke.py",
+    "tests/test_install_long_task_retrospective.py"
   ],
   "scripts": {
-    "test:codex-paid": "python3 scripts/test-codex-paid-smoke.py"
+    "test:codex-paid": "python3 scripts/test-codex-paid-smoke.py",
+    "test:skill-installer": "python3 -m unittest discover -s tests -p 'test_install_long_task_retrospective.py'"
   }
 }
