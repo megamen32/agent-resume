@@ -2,6 +2,12 @@
 
 MCP/CLI helper that waits for background work and resumes the same local coding-agent session when the work is done.
 
+[Русский](README.ru.md) · [简体中文](README.zh.md)
+
+![agent-resume developer workspace](docs/assets/readme-hero.png)
+
+> Checked in this workspace with Python 3.10.12, Node.js 22.22.3, npm 10.9.8, and pytest 8.4.2.
+
 `agent-resume` is now the long-wait/control-plane tool. It can run a command, attach to an existing PID/query, or wait a fixed timer, then wake the same CLI coding agent and continue the task. `notify` is only an optional human Telegram ping.
 
 ## Supported agents
@@ -9,6 +15,16 @@ MCP/CLI helper that waits for background work and resumes the same local coding-
 - Codex CLI: `codex exec resume <SESSION_ID> "prompt"` or `codex exec resume --last "prompt"`
 - OpenCode: `opencode --session <SESSION_ID> --prompt "prompt"` or `opencode --continue --prompt "prompt"`
 - Claude Code: supported as a fallback, but normally not installed because Claude can resume itself.
+
+## Quick start
+
+From this checkout, install the MCP entry in Codex and OpenCode with one command:
+
+```bash
+python3 scripts/install-client-configs.py codex opencode
+```
+
+The script is dependency-free and idempotent. It writes the client identity and the real `npx -y github:megamen32/agent-resume` launcher into each config. Restart the MCP client after installation or an upgrade.
 
 
 ## Install into clients automatically
