@@ -82,6 +82,24 @@ def test_register_exposes_gateway_hook_not_an_llm_tool_or_heartbeat():
     assert "heartbeat" not in str(calls).lower()
 
 
+def test_pre_dispatch_starts_the_plugin_only_bridge_before_agent_dispatch():
+    mod = load_module()
+    calls = []
+
+    async def fake_start(gateway):
+        calls.append(gateway)
+
+    gateway = object()
+    with patch.object(mod, "start_bridge", fake_start):
+        asyncio.run(_yield_pre_dispatch(mod, gateway))
+    assert calls == [gateway]
+
+
+async def _yield_pre_dispatch(mod, gateway):
+    mod._on_pre_gateway_dispatch(gateway=gateway)
+    await asyncio.sleep(0)
+
+
 def test_agent_resume_adapter_sends_only_locator_and_opaque_reference():
     mod = load_module()
     requests = []
