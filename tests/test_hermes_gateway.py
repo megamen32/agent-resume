@@ -78,7 +78,7 @@ def test_register_exposes_gateway_hook_not_an_llm_tool_or_heartbeat():
     calls = []
     ctx = SimpleNamespace(register_hook=lambda *args: calls.append(args))
     mod.register(ctx)
-    assert [call[0] for call in calls] == ["pre_gateway_dispatch"]
+    assert [call[0] for call in calls] == ["pre_gateway_dispatch", "gateway_startup"]
     assert "heartbeat" not in str(calls).lower()
 
 
