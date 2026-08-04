@@ -10,6 +10,7 @@
   },
   "files": [
     "README.md",
+    "CHANGELOG.md",
     "agent_resume.py",
     "npm/agent-resume-mcp.js",
     "skills/long-task-retrospective/SKILL.md",

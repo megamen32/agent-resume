@@ -2,6 +2,12 @@
 
 MCP/CLI helper that waits for background work and resumes the same local coding-agent session when the work is done.
 
+[Русский](README.ru.md) · [简体中文](README.zh.md)
+
+![agent-resume developer workspace](docs/assets/readme-hero.png)
+
+> Checked in this workspace with Python 3.10.12, Node.js 22.22.3, npm 10.9.8, and pytest 8.4.2.
+
 `agent-resume` is now the long-wait/control-plane tool. It can run a command, attach to an existing PID/query, or wait a fixed timer, then wake the same CLI coding agent and continue the task. `notify` is only an optional human Telegram ping.
 
 ## Supported agents
@@ -9,6 +15,16 @@ MCP/CLI helper that waits for background work and resumes the same local coding-
 - Codex CLI: `codex exec resume <SESSION_ID> "prompt"` or `codex exec resume --last "prompt"`
 - OpenCode: `opencode --session <SESSION_ID> --prompt "prompt"` or `opencode --continue --prompt "prompt"`
 - Claude Code: supported as a fallback, but normally not installed because Claude can resume itself.
+
+## Quick start
+
+From this checkout, install the MCP entry in Codex and OpenCode with one command:
+
+```bash
+python3 scripts/install-client-configs.py codex opencode
+```
+
+The script is dependency-free and idempotent. It writes the client identity and the real `npx -y github:megamen32/agent-resume` launcher into each config. Restart the MCP client after installation or an upgrade.
 
 
 ## Install into clients automatically
@@ -27,6 +43,11 @@ The installer sets client identity once in each MCP config:
 - Claude Code is not installed by default; Claude can resume itself. Pass `claude` explicitly to the installer only if you want the fallback.
 
 After that, tools can be called without passing `agent`.
+
+> **Restart your MCP client after upgrading.** `agent-resume` is a Python
+> script loaded once by the MCP relay at startup. It does not hot-reload.
+> After upgrading the package, restart Codex / OpenCode / Claude so the new
+> tool definitions and scan logic take effect.
 
 ## Agent identity
 
@@ -126,7 +147,31 @@ marker = exactly 5 ASCII alphanumeric chars: [A-Za-z0-9]{5}
 example: Q7xK2
 ```
 
-The model should put the same marker in the session title/prompt/cwd when starting the long task, then pass it to `agent-resume` later. The MCP server records `called_at_ms` itself; the model does not need to know the time.
+The model should put the same marker in **any one** of these surfaces when starting the long task, then pass it to `agent-resume` later:
+
+- the session **title** (`opencode run --title "...$MARKER..."`)
+- the **cwd** directory name or a project subpath
+- the user **prompt** itself (e.g. `"Marker: $MARKER — do the task"`)
+- the model's own **assistant text** response — `agent-resume` scans both
+  user and assistant text parts in opencode `part.data` rows, codex
+  rollout JSONL assistant messages, and claude project transcripts.
+  This is the most reliable surface because the marker survives even
+  when the user prompt is paraphrased by compaction.
+
+`agent-resume` adds **+100 score** at most once across all of these surfaces per session, so there is no benefit to placing the marker in multiple places. The MCP server records `called_at_ms` itself; the model does not need to know the time.
+
+Opencode specifics:
+
+- Compaction summaries (`part.type='compaction'`) and system-injected
+  text parts (`synthetic=1`, e.g. skill triggers and JSON-format
+  prompts) are **not** matched — they are filtered out before the
+  `instr()` substring scan.
+- `session_message` (the projection table opencode is migrating
+  toward) is scanned in parallel with the legacy `part`+`message`
+  JOIN so marker matching keeps working through the migration.
+- If the opencode DB lacks all body-bearing tables, `agent-resume`
+  writes a one-time warning to stderr and falls back to metadata-only
+  matching.
 
 Example for OpenCode/Claude-style clients:
 
@@ -144,6 +189,20 @@ export OPENCODE_DISABLE_CHANNEL_DB=true
 ```
 
 `use_last` is disabled because it can wake the wrong chat.
+
+### Privacy opt-out: skip body scanning
+
+By default `agent-resume` reads message bodies to find the marker.
+If you prefer that it only match against metadata (session title /
+directory / path), disable body scanning:
+
+```bash
+export AGENT_RESUME_SCAN_MESSAGE_BODIES=0
+```
+
+This applies to all three agents — opencode `part.data`, codex rollout
+JSONL, and claude project transcripts. The env var is read once at
+MCP server startup; restart your MCP client after changing it.
 
 
 ## Where SESSION_ID comes from
@@ -237,7 +296,7 @@ Fallback:
 OpenCode source was checked from local fork:
 
 ```text
-/home/roomhacker/.config/opencode/apps/forks/opencode
+/home/roomhacker/agents-projects/apps/forks/opencode
 ```
 
 Important files:
