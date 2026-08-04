@@ -760,6 +760,115 @@ def resume_agent(args: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _bound_target_identity(target: Any) -> Dict[str, Any]:
+    """Validate and normalize an already-selected, immutable resume target.
+
+    This deliberately does not consult any session index.  The caller owns
+    correlation/selection and must supply the complete target identity.
+    """
+    if not isinstance(target, dict):
+        raise ValueError("target must be an object containing agent, session_id, and cwd")
+    agent = normalize_agent(str(target.get("agent") or ""))
+    session_id = target.get("session_id") or target.get("sessionId")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("target.session_id is required")
+    cwd_value = target.get("cwd")
+    if not isinstance(cwd_value, str) or not cwd_value.strip():
+        raise ValueError("target.cwd is required")
+    cwd = str(safe_cwd(cwd_value))
+    marker = target.get("marker")
+    marker = validate_marker(marker) if marker is not None else None
+    model = target.get("model")
+    if model is not None and (not isinstance(model, str) or not model.strip()):
+        raise ValueError("target.model must be a non-empty string when provided")
+    if target.get("use_last"):
+        raise ValueError("target.use_last is unsafe and disabled")
+    return {
+        "agent": agent,
+        "session_id": session_id.strip(),
+        "cwd": cwd,
+        "marker": marker,
+        "model": model.strip() if isinstance(model, str) else None,
+    }
+
+
+def resume_bound_target(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Resume only the immutable target selected by an upstream orchestrator.
+
+    Unlike :func:`resume_agent`, this transport entrypoint never performs
+    session discovery and never accepts a last-session fallback.  It returns a
+    machine-readable receipt in both success and failure cases.
+    """
+    receipt_id = f"resume-{uuid.uuid4().hex}"
+    target_input = args.get("target")
+    result_ref = args.get("result_ref")
+    identity: Optional[Dict[str, Any]] = None
+    try:
+        if not isinstance(result_ref, str) or not result_ref.strip():
+            raise ValueError("result_ref must be a non-empty opaque reference")
+        if args.get("use_last"):
+            raise ValueError("use_last is unsafe and disabled")
+        identity = _bound_target_identity(target_input)
+        prompt = args.get("prompt")
+        if prompt is None:
+            prompt = default_prompt(
+                args.get("job_id"), args.get("log_file"), args.get("status"),
+                args.get("note"), marker=identity["marker"], called_at_ms=now_ms(),
+            )
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
+        command = build_resume_command(
+            identity["agent"], identity["session_id"], identity["cwd"],
+            prompt, use_last=False, model=identity["model"],
+        )
+        receipt: Dict[str, Any] = {
+            "receipt_id": receipt_id,
+            "receipt_ref": receipt_id,
+            "result_ref": result_ref,
+            "status": "accepted",
+            "target": identity,
+            "command": command,
+            "shell_command": " ".join(shlex.quote(x) for x in command),
+            "executed": False,
+        }
+        if args.get("execute", True):
+            log_dir = STATE_DIR / "runs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            launch_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{identity['agent']}"
+            log = log_dir / f"{launch_id}.log"
+            shell = f"setsid {' '.join(shlex.quote(x) for x in command)} > {shlex.quote(str(log))} 2>&1 < /dev/null & echo $!"
+            launch = subprocess.run(
+                ["/bin/bash", "-lc", shell], cwd=identity["cwd"],
+                text=True, capture_output=True, timeout=10,
+            )
+            receipt.update({
+                "executed": True,
+                "launch_returncode": launch.returncode,
+                "launch_stdout": launch.stdout,
+                "launch_stderr": launch.stderr,
+                "log_file": str(log),
+            })
+            try:
+                receipt["pid"] = int(launch.stdout.strip().splitlines()[-1])
+            except Exception:
+                receipt["pid"] = None
+            if launch.returncode != 0:
+                receipt["status"] = "failed"
+                receipt["error"] = launch.stderr or launch.stdout or "resume launch failed"
+            else:
+                receipt["pid"] = receipt["pid"]
+        return receipt
+    except Exception as exc:
+        return {
+            "receipt_id": receipt_id,
+            "receipt_ref": receipt_id,
+            "result_ref": result_ref,
+            "status": "failed",
+            "target": identity,
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+
+
 # ---------------- background wait/resume ----------------
 
 def parse_duration_seconds(value: Any, default: int = 0) -> int:
@@ -1080,6 +1189,11 @@ BASE_TOOLS = {
         "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"cwd":{"type":["string","null"]},"session_id":{"type":["string","null"]},"prompt":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"query":{"type":["string","null"]},"marker":{"type":["string","null"],"description":"Required unless session_id is explicit. Exactly 5 ASCII alphanumeric chars [A-Za-z0-9]."},"execute":{"type":"boolean","default":False,"description":"If true, start the resume command detached. Default false for safety."}},"required":[],"additionalProperties":True},
         "handler": resume_agent,
     },
+    "resume_bound_target": {
+        "description": "Resume an already selected immutable agent target. Never searches sessions and never uses --last. Returns a receipt with status accepted or failed and the frozen target identity.",
+        "inputSchema": {"type":"object","properties":{"target":{"type":"object","description":"Frozen target selected by the orchestrator.","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"session_id":{"type":"string"},"cwd":{"type":"string"},"marker":{"type":["string","null"]},"model":{"type":["string","null"]}},"required":["agent","session_id","cwd"],"additionalProperties":False},"prompt":{"type":"string"},"result_ref":{"type":"string"},"execute":{"type":"boolean","default":True}},"required":["target","result_ref"],"additionalProperties":False},
+        "handler": resume_bound_target,
+    },
     "run_and_resume": {
         "description": "Run a non-interactive command in background, wait until it finishes or hard_timeout is reached, then resume the same agent chat. This is the agent-resume replacement for notify long-wait flow. For Codex the current thread is frozen from MCP _meta; for OpenCode/Claude pass cwd+marker.",
         "inputSchema": {"type":"object","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"command":{"type":"string"},"cwd":{"type":["string","null"]},"marker":{"type":["string","null"],"description":"Required for OpenCode/Claude unless session_id is explicit."},"session_id":{"type":["string","null"]},"query":{"type":["string","null"]},"job_id":{"type":["string","null"]},"log_file":{"type":["string","null"]},"note":{"type":["string","null"]},"hard_timeout":{"type":["string","integer","null"],"default":"0","description":"Maximum watch time, e.g. 30m, 1h. 0 disables timeout. Does not kill the process; resumes with timeout note."},"execute_resume":{"type":"boolean","default":True,"description":"Default true. Set false only for tests: watcher records the resume command but does not launch it."}},"required":["command"],"additionalProperties":True},
@@ -1205,6 +1319,11 @@ def cli_main() -> None:
     f.add_argument("--agent", choices=["codex","opencode","claude"], help="Defaults to AGENT_RESUME_AGENT/config.json"); f.add_argument("--cwd"); f.add_argument("--query"); f.add_argument("--marker"); f.add_argument("--limit", type=int, default=20)
     r=sub.add_parser("resume")
     r.add_argument("--agent", choices=["codex","opencode","claude"], help="Defaults to AGENT_RESUME_AGENT/config.json"); r.add_argument("--cwd"); r.add_argument("--session-id"); r.add_argument("--prompt"); r.add_argument("--job-id"); r.add_argument("--log-file"); r.add_argument("--note"); r.add_argument("--query"); r.add_argument("--marker"); r.add_argument("--execute", action="store_true")
+    b=sub.add_parser("resume_bound_target")
+    b.add_argument("--target", required=True, help="JSON object with agent, session_id, and cwd")
+    b.add_argument("--prompt")
+    b.add_argument("--result-ref", required=True)
+    b.add_argument("--execute", action="store_true")
     w = sub.add_parser("_watch"); w.add_argument("--meta", required=True)
     sub.add_parser("mcp")
     args=ap.parse_args()
@@ -1212,6 +1331,12 @@ def cli_main() -> None:
     if args.cmd == "mcp": mcp_main(); return
     if args.cmd == "find": print(json.dumps({"sessions": find_sessions(args.agent, args.cwd, args.query, args.limit, args.marker)}, ensure_ascii=False, indent=2)); return
     if args.cmd == "resume": print(json.dumps(resume_agent(vars(args)), ensure_ascii=False, indent=2)); return
+    if args.cmd == "resume_bound_target":
+        try:
+            target = json.loads(args.target)
+        except json.JSONDecodeError as exc:
+            print(json.dumps({"receipt_id": f"resume-{uuid.uuid4().hex}", "receipt_ref": f"resume-cli-{uuid.uuid4().hex}", "status": "failed", "target": None, "result_ref": args.result_ref, "reason": "invalid", "error": f"invalid target JSON: {exc.msg}"}, ensure_ascii=False, indent=2)); return
+        print(json.dumps(resume_bound_target({"target": target, "prompt": args.prompt, "result_ref": args.result_ref, "execute": args.execute}), ensure_ascii=False, indent=2)); return
 
 if __name__ == "__main__":
     cli_main()
