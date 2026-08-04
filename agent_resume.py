@@ -671,6 +671,8 @@ def build_resume_command(agent: Optional[str], session_id: Optional[str], cwd: O
     if a == "codex":
         if session_id:
             cmd = ["codex", "exec", "resume"]
+            if cwd and not _is_git_worktree(cwd):
+                cmd = ["codex", "exec", "--skip-git-repo-check", "resume"]
             if model:
                 cmd.extend(["--model", model])
             return [*cmd, session_id, prompt]
@@ -690,6 +692,17 @@ def build_resume_command(agent: Optional[str], session_id: Optional[str], cwd: O
             raise ValueError("use_last is unsafe and disabled")
         raise ValueError("claude resume requires session_id")
     raise AssertionError(a)
+
+
+def _is_git_worktree(cwd: str) -> bool:
+    try:
+        probe = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+            text=True, capture_output=True, timeout=2,
+        )
+        return probe.returncode == 0 and probe.stdout.strip() == "true"
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def resume_agent(args: Dict[str, Any]) -> Dict[str, Any]:

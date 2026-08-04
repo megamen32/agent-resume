@@ -50,6 +50,8 @@ class ResumeBoundTargetTests(unittest.TestCase):
                 self.assertEqual(receipt["target"]["cwd"], target_cwd)
                 self.assertFalse(receipt["executed"])
                 self.assertNotIn("--last", receipt["command"])
+                if agent == "codex":
+                    self.assertIn("--skip-git-repo-check", receipt["command"])
 
     def test_rejects_missing_bound_target_without_fallback_lookup(self) -> None:
         agent_resume = load_agent_resume()
