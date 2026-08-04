@@ -58,8 +58,8 @@ def normalize_agent(agent: str) -> str:
         "anthropic-claude": "claude",
     }
     a = aliases.get(a, a)
-    if a not in {"codex", "opencode", "claude"}:
-        raise ValueError("agent must be one of: codex, opencode, claude")
+    if a not in {"codex", "opencode", "claude", "hermes"}:
+        raise ValueError("agent must be one of: codex, opencode, claude, hermes")
     return a
 
 
@@ -767,8 +767,11 @@ def _bound_target_identity(target: Any) -> Dict[str, Any]:
     correlation/selection and must supply the complete target identity.
     """
     if not isinstance(target, dict):
-        raise ValueError("target must be an object containing agent, session_id, and cwd")
+        raise ValueError("target must be an object")
     agent = normalize_agent(str(target.get("agent") or ""))
+    if agent == "hermes":
+        from hermes_gateway import _target as normalize_hermes_target
+        return {"agent": "hermes", "locator": normalize_hermes_target(target.get("locator") or {})}
     session_id = target.get("session_id") or target.get("sessionId")
     if not isinstance(session_id, str) or not session_id.strip():
         raise ValueError("target.session_id is required")
@@ -809,6 +812,27 @@ def resume_bound_target(args: Dict[str, Any]) -> Dict[str, Any]:
         if args.get("use_last"):
             raise ValueError("use_last is unsafe and disabled")
         identity = _bound_target_identity(target_input)
+        if identity["agent"] == "hermes":
+            from hermes_gateway import HermesGatewayAdapter
+            endpoint = os.environ.get("AGENT_RESUME_HERMES_ENDPOINT", "")
+            token = os.environ.get("AGENT_RESUME_HERMES_TOKEN", "")
+            raw_receipt = HermesGatewayAdapter(endpoint, token).wake(identity["locator"], result_ref)
+            if raw_receipt.get("target") != identity["locator"] or raw_receipt.get("result_ref") != result_ref:
+                raise RuntimeError("Hermes wake receipt does not match the bound target")
+            status = raw_receipt.get("status")
+            if status not in {"accepted", "failed"}:
+                raise RuntimeError("Hermes wake receipt has an invalid status")
+            receipt_ref = raw_receipt.get("receipt_ref") or raw_receipt.get("receipt_id")
+            if not isinstance(receipt_ref, str) or not receipt_ref:
+                raise RuntimeError("Hermes wake receipt has no receipt reference")
+            return {
+                "receipt_id": receipt_ref,
+                "receipt_ref": receipt_ref,
+                "result_ref": result_ref,
+                "status": status,
+                "target": identity,
+                **({"reason": raw_receipt.get("reason", "failed")} if status == "failed" else {}),
+            }
         prompt = args.get("prompt")
         if prompt is None:
             prompt = default_prompt(

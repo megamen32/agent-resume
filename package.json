@@ -11,8 +11,10 @@
     "README.md",
     "CHANGELOG.md",
     "agent_resume.py",
+    "hermes_gateway.py",
     "npm/agent-resume-mcp.js",
     "scripts/install-client-configs.py",
+    "scripts/install-hermes-plugin.py",
     "scripts/test-codex-paid-smoke.py"
   ],
   "scripts": {
