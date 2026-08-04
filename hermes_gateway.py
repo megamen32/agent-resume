@@ -181,3 +181,13 @@ class HermesGatewayAdapter:
 
 def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
+    # Normal Gateway startup already has a live runner and an event loop. Start
+    # immediately when that seam is available; pre_gateway_dispatch remains a
+    # retry path for deferred/plugin-only startup.
+    try:
+        from gateway.run import _gateway_runner_ref
+        gateway = _gateway_runner_ref()
+        if gateway is not None:
+            asyncio.get_running_loop().create_task(start_bridge(gateway), name="agent-resume-hermes-bridge")
+    except (ModuleNotFoundError, RuntimeError):
+        pass
