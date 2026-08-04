@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 _OPAQUE_REF = re.compile(r"^(?:urn:agent-herder:)?[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 _PLATFORM_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-_CHAT_TYPES = {"dm", "group", "channel", "thread"}
+_CHAT_TYPES = {"dm", "group", "channel", "thread", "webhook"}
 _TOKEN_ENV = "AGENT_RESUME_HERMES_TOKEN"
 _HOST_ENV = "AGENT_RESUME_HERMES_HOST"
 _PORT_ENV = "AGENT_RESUME_HERMES_PORT"
