@@ -13,6 +13,7 @@ import json
 import os
 import re
 import uuid
+import logging
 from dataclasses import dataclass
 from typing import Any, Mapping
 from urllib.request import Request, urlopen
@@ -25,6 +26,7 @@ _HOST_ENV = "AGENT_RESUME_HERMES_HOST"
 _PORT_ENV = "AGENT_RESUME_HERMES_PORT"
 _PATH = "/v1/agent-resume/wake"
 _bridge: "Bridge | None" = None
+logger = logging.getLogger(__name__)
 
 
 def _receipt_id() -> str:
@@ -154,7 +156,8 @@ async def start_bridge(gateway: Any) -> Bridge | None:
         await site.start()
         _bridge = Bridge(runner=runner, site=site)
         return _bridge
-    except Exception:
+    except Exception as exc:
+        logger.warning("agent-resume Hermes bridge did not start: %s", exc)
         return None
 
 
