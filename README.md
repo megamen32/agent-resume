@@ -1,8 +1,37 @@
 # agent-resume
 
-MCP/CLI helper that waits for background work and resumes the same local coding-agent session when the work is done.
+![agent-resume — a coding session picks up when the long job ends](docs/assets/agent-resume-flow.png)
 
-`agent-resume` is now the long-wait/control-plane tool. It can run a command, attach to an existing PID/query, or wait a fixed timer, then wake the same CLI coding agent and continue the task. `notify` is only an optional human Telegram ping.
+> Your coding agent should not sit idle while tests, builds, or deployments run. **agent-resume waits in the background, then resumes the same local Codex, OpenCode, or Claude Code session with the result.**
+
+Run a long command, attach to an existing process, or set a timer. The assistant returns when it has something useful to do—without guessing which conversation to wake.
+
+## Install
+
+```bash
+npx -y github:megamen32/agent-resume --help
+```
+
+That runs the published MCP launcher without cloning or building this repository. To add ready-to-use Codex and OpenCode entries from a source checkout:
+
+```bash
+python3 scripts/install-client-configs.py codex opencode
+```
+
+Restart the MCP client after upgrading: the local relay loads the tool definition when it starts.
+
+## What it unblocks
+
+- **Keep working while a command runs.** Start a test, build, or deploy and resume the same chat when it exits.
+- **Attach instead of polling.** Watch a known PID or a process query already running on the machine.
+- **Wake the right conversation.** Codex uses its explicit thread ID; OpenCode and Claude use your explicit marker and working directory.
+- **Use the same control plane across agents.** Codex CLI, OpenCode, and Claude Code receive their native resume command.
+
+## Start in minutes
+
+1. Add `agent-resume` to your MCP client using the configuration below.
+2. Call `run_and_resume`, `attach_pid_and_resume`, `attach_query_and_resume`, or `wait_and_resume`.
+3. Continue working; when the background job finishes, agent-resume launches the matching resume command with the job result.
 
 ## Supported agents
 
@@ -10,15 +39,9 @@ MCP/CLI helper that waits for background work and resumes the same local coding-
 - OpenCode: `opencode --session <SESSION_ID> --prompt "prompt"` or `opencode --continue --prompt "prompt"`
 - Claude Code: supported as a fallback, but normally not installed because Claude can resume itself.
 
-
-## Install into clients automatically
+## Client configuration
 
 Run the installer to write ready-to-use MCP config entries for Codex and OpenCode:
-
-```bash
-npx -y github:megamen32/agent-resume --help
-python3 scripts/install-client-configs.py codex opencode
-```
 
 The installer sets client identity once in each MCP config:
 
@@ -27,11 +50,6 @@ The installer sets client identity once in each MCP config:
 - Claude Code is not installed by default; Claude can resume itself. Pass `claude` explicitly to the installer only if you want the fallback.
 
 After that, tools can be called without passing `agent`.
-
-> **Restart your MCP client after upgrading.** `agent-resume` is a Python
-> script loaded once by the MCP relay at startup. It does not hot-reload.
-> After upgrading the package, restart Codex / OpenCode / Claude so the new
-> tool definitions and scan logic take effect.
 
 ## Agent identity
 
@@ -93,10 +111,7 @@ MCP tools:
 - `attach_pid_and_resume` — watch an existing PID and resume when it exits.
 - `attach_query_and_resume` — find a process by command substring, watch it, then resume.
 - `wait_and_resume` — wait a fixed duration, then resume.
-- `wait_job_status` — inspect the background wait job state. `watcher_alive`
-  reports whether the detached watcher is still armed; legacy `alive` and
-  `watched_pid_alive` describe only a watched command/PID (and are false for a
-  timer by design).
+- `wait_job_status` — inspect the background wait job state.
 
 Default behavior is `execute_resume=true`: when the watched process/timer finishes, the watcher launches the appropriate resume command in the background. Set `execute_resume=false` only for tests.
 
@@ -343,4 +358,4 @@ Run it explicitly when needed:
 AGENT_RESUME_RUN_PAID_CODEX=1 AGENT_RESUME_CODEX_MODEL=gpt-5.4-mini npm run test:codex-paid
 ```
 
-It asserts that Codex calls `agent_resume.build_resume_command` without `cwd` and without `marker`, that `session_id_source == "mcp_meta"`, `marker == null`, `used_last == false`, and that the full argv array begins with `codex exec resume --model <persisted-model> <thread-id>`.
+It asserts that Codex calls `agent_resume.build_resume_command` without `cwd` and without `marker`, that `session_id_source == "mcp_meta"`, `marker == null`, `used_last == false`, and that `command` is the full argv array beginning with `codex exec resume <thread_id>`.
