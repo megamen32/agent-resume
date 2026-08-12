@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -21,10 +22,13 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+import fcntl
 
 HOME = Path.home()
 STATE_DIR = Path(os.environ.get("AGENT_RESUME_STATE_DIR", HOME / ".local/state/agent-resume"))
@@ -781,13 +785,35 @@ def _bound_target_identity(target: Any) -> Dict[str, Any]:
     """
     if not isinstance(target, dict):
         raise ValueError("target must be an object")
-    agent = normalize_agent(str(target.get("agent") or ""))
+    agent_values: List[str] = []
+    for alias in ("agent", "harness"):
+        if alias not in target:
+            continue
+        value = target[alias]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"target.{alias} must be a non-empty string when provided")
+        agent_values.append(normalize_agent(value))
+    if not agent_values:
+        raise ValueError("target.agent is required")
+    if any(value != agent_values[0] for value in agent_values[1:]):
+        raise ValueError("target agent aliases must agree")
+    agent = agent_values[0]
     if agent == "hermes":
         from hermes_gateway import _target as normalize_hermes_target
         return {"agent": "hermes", "locator": normalize_hermes_target(target.get("locator") or {})}
-    session_id = target.get("session_id") or target.get("sessionId")
-    if not isinstance(session_id, str) or not session_id.strip():
+    session_values: List[str] = []
+    for alias in ("session_id", "sessionId", "thread_id", "threadId"):
+        if alias not in target:
+            continue
+        value = target[alias]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"target.{alias} must be a non-empty string when provided")
+        session_values.append(value.strip())
+    if not session_values:
         raise ValueError("target.session_id is required")
+    if any(value != session_values[0] for value in session_values[1:]):
+        raise ValueError("target session aliases must agree")
+    session_id = session_values[0]
     cwd_value = target.get("cwd")
     if not isinstance(cwd_value, str) or not cwd_value.strip():
         raise ValueError("target.cwd is required")
@@ -801,11 +827,208 @@ def _bound_target_identity(target: Any) -> Dict[str, Any]:
         raise ValueError("target.use_last is unsafe and disabled")
     return {
         "agent": agent,
-        "session_id": session_id.strip(),
+        "session_id": session_id,
         "cwd": cwd,
         "marker": marker,
         "model": model.strip() if isinstance(model, str) else None,
     }
+
+
+def _validate_idempotency_key(value: Any, *, required: bool = False) -> Optional[str]:
+    """Validate the stable key used to deduplicate a bound resume request."""
+    if value is None or str(value).strip() == "":
+        if required:
+            raise ValueError("idempotency_key is required")
+        return None
+    key = str(value).strip()
+    if len(key) > 512:
+        raise ValueError("idempotency_key must be at most 512 characters")
+    return key
+
+
+def _receipt_fingerprint(identity: Dict[str, Any], prompt: str, goal: Any, idempotency_key: str, result_ref: Optional[str]) -> str:
+    """Return a stable digest binding the request to its exact target and goal."""
+    payload = {
+        "harness": identity["agent"],
+        "agent": identity["agent"],
+        "sessionId": identity.get("session_id"),
+        "cwd": identity.get("cwd"),
+        "target": identity,
+        "prompt": prompt,
+        "goal": goal if goal is not None else prompt,
+        "idempotency_key": idempotency_key,
+    }
+    if result_ref is not None:
+        payload["result_ref"] = result_ref
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _receipt_ledger_path() -> Path:
+    """Return the durable receipt ledger path for the current state directory."""
+    return STATE_DIR / "receipts.json"
+
+
+def _read_receipt_records(path: Path) -> Dict[str, Dict[str, Any]]:
+    """Read receipt records, tolerating an absent or empty first-run ledger."""
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"receipt ledger is unreadable: {path}") from exc
+    records = raw.get("receipts", {}) if isinstance(raw, dict) else {}
+    if not isinstance(records, dict):
+        raise RuntimeError(f"receipt ledger has invalid records: {path}")
+    return {str(key): value for key, value in records.items() if isinstance(value, dict)}
+
+
+def _write_receipt_records(path: Path, records: Dict[str, Dict[str, Any]]) -> None:
+    """Atomically persist receipt records and flush the completed replacement."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    payload = {"version": 1, "receipts": records}
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def _locked_receipt_records() -> Iterable[Dict[str, Dict[str, Any]]]:
+    """Lock, load, and atomically persist the receipt ledger across processes."""
+    ledger = _receipt_ledger_path()
+    lock_path = ledger.with_suffix(ledger.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        records = _read_receipt_records(ledger)
+        try:
+            yield records
+            _write_receipt_records(ledger, records)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def query_resume_receipt(args: Any) -> Dict[str, Any]:
+    """Read the durable receipt for an idempotency key after a process restart."""
+    value = args.get("idempotency_key") if isinstance(args, dict) else args
+    key = _validate_idempotency_key(value, required=True)
+    ledger = _receipt_ledger_path()
+    lock_path = ledger.with_suffix(ledger.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+        record = _read_receipt_records(ledger).get(key)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    if record is None:
+        raise FileNotFoundError(f"receipt not found for idempotency_key: {key}")
+    return record
+
+
+get_resume_receipt = query_resume_receipt
+
+
+def _native_admission_verified(proof: Any, identity: Dict[str, Any]) -> bool:
+    """Accept only an explicit proof tied to the same Codex agent and session."""
+    if not isinstance(proof, dict) or proof.get("verified") is not True:
+        return False
+    for alias in ("agent", "harness"):
+        if alias not in proof:
+            continue
+        value = proof[alias]
+        if not isinstance(value, str) or not value.strip():
+            return False
+        try:
+            if normalize_agent(value) != identity["agent"]:
+                return False
+        except ValueError:
+            return False
+
+    has_session_identity = False
+    for alias in ("session_id", "sessionId", "thread_id", "threadId"):
+        if alias not in proof:
+            continue
+        value = proof[alias]
+        if not isinstance(value, str) or not value.strip() or value.strip() != identity.get("session_id"):
+            return False
+        has_session_identity = True
+    return has_session_identity
+
+
+def _resume_bound_target_idempotent(args: Dict[str, Any], idempotency_key: str) -> Dict[str, Any]:
+    """Execute or replay one target-bound request under the receipt ledger lock."""
+    receipt_id = f"resume-{uuid.uuid4().hex}"
+    identity: Optional[Dict[str, Any]] = None
+    try:
+        identity = _bound_target_identity(args.get("target"))
+        goal = args.get("goal")
+        prompt = args.get("prompt")
+        if prompt is None:
+            prompt = goal
+        if prompt is None:
+            prompt = default_prompt(args.get("job_id"), args.get("log_file"), args.get("status"), args.get("note"), marker=identity.get("marker"))
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
+        result_ref = args.get("result_ref")
+        if not isinstance(result_ref, str) or not result_ref.strip():
+            raise ValueError("result_ref must be a non-empty opaque reference")
+        fingerprint = _receipt_fingerprint(identity, prompt, goal, idempotency_key, result_ref)
+    except Exception as exc:
+        return {"receipt_id": receipt_id, "receipt_ref": receipt_id, "idempotency_key": idempotency_key, "status": "rejected", "target": identity, "reason": "invalid_request", "error": f"{exc.__class__.__name__}: {exc}"}
+
+    with _locked_receipt_records() as records:
+        previous = records.get(idempotency_key)
+        if previous is not None:
+            if previous.get("fingerprint") == fingerprint:
+                proof = args.get("admission_proof") or args.get("native_admission_proof")
+                if (
+                    previous.get("status") == "ambiguous"
+                    and previous.get("reason") == "detached_codex_spawn_unverified"
+                    and previous.get("target") == identity
+                    and identity["agent"] == "codex"
+                    and _native_admission_verified(proof, identity)
+                ):
+                    promoted = dict(previous)
+                    promoted.update({
+                        "status": "accepted",
+                        "reason": "native_admission_verified",
+                        "admitted_at": now_iso(),
+                    })
+                    records[idempotency_key] = promoted
+                    return promoted
+                return previous
+            return {
+                "receipt_id": receipt_id,
+                "receipt_ref": receipt_id,
+                "idempotency_key": idempotency_key,
+                "status": "rejected",
+                "target": identity,
+                "reason": "idempotency_conflict",
+                "existing_receipt_id": previous.get("receipt_id"),
+            }
+
+        legacy_args = dict(args)
+        legacy_args.pop("idempotency_key", None)
+        legacy_args["prompt"] = prompt
+        raw = resume_bound_target(legacy_args)
+        receipt = dict(raw)
+        receipt["idempotency_key"] = idempotency_key
+        receipt["fingerprint"] = fingerprint
+        status = raw.get("status")
+        if status == "accepted":
+            receipt["status"] = "accepted"
+            receipt["reason"] = "resume_process_started" if identity["agent"] == "codex" and args.get("execute", True) else "prepared"
+        else:
+            receipt["status"] = "rejected"
+            receipt["reason"] = raw.get("reason") or "resume_rejected"
+        records[idempotency_key] = receipt
+        return receipt
 
 
 def resume_bound_target(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -815,6 +1038,9 @@ def resume_bound_target(args: Dict[str, Any]) -> Dict[str, Any]:
     session discovery and never accepts a last-session fallback.  It returns a
     machine-readable receipt in both success and failure cases.
     """
+    idempotency_key = _validate_idempotency_key(args.get("idempotency_key"))
+    if idempotency_key is not None:
+        return _resume_bound_target_idempotent(args, idempotency_key)
     receipt_id = f"resume-{uuid.uuid4().hex}"
     target_input = args.get("target")
     result_ref = args.get("result_ref")
@@ -1227,9 +1453,19 @@ BASE_TOOLS = {
         "handler": resume_agent,
     },
     "resume_bound_target": {
-        "description": "Resume an already selected immutable agent target. Never searches sessions and never uses --last. Returns a receipt with status accepted or failed and the frozen target identity.",
-        "inputSchema": {"type":"object","properties":{"target":{"type":"object","description":"Frozen target selected by the orchestrator.","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"session_id":{"type":"string"},"cwd":{"type":"string"},"marker":{"type":["string","null"]},"model":{"type":["string","null"]}},"required":["agent","session_id","cwd"],"additionalProperties":False},"prompt":{"type":"string"},"result_ref":{"type":"string"},"execute":{"type":"boolean","default":True}},"required":["target","result_ref"],"additionalProperties":False},
+        "description": "Resume an already selected immutable agent target. With idempotency_key, the durable receipt ledger deduplicates exact retries and rejects conflicting reuse; detached Codex spawn remains ambiguous without native admission proof.",
+        "inputSchema": {"type":"object","properties":{"target":{"type":"object","description":"Frozen target selected by the orchestrator.","properties":{"agent":{"type":"string","enum":["codex","opencode","claude"]},"harness":{"type":"string"},"session_id":{"type":"string"},"sessionId":{"type":"string"},"thread_id":{"type":"string"},"threadId":{"type":"string"},"cwd":{"type":"string"},"marker":{"type":["string","null"]},"model":{"type":["string","null"]}},"required":["cwd"],"additionalProperties":False},"prompt":{"type":"string"},"goal":{"type":"string"},"result_ref":{"type":"string"},"idempotency_key":{"type":"string"},"admission_proof":{"type":"object"},"execute":{"type":"boolean","default":True}},"required":["target","result_ref"],"additionalProperties":False},
         "handler": resume_bound_target,
+    },
+    "query_resume_receipt": {
+        "description": "Read a durable target-bound resume receipt by idempotency_key after a process restart.",
+        "inputSchema": {"type":"object","properties":{"idempotency_key":{"type":"string"}},"required":["idempotency_key"],"additionalProperties":False},
+        "handler": query_resume_receipt,
+    },
+    "get_resume_receipt": {
+        "description": "Read a durable target-bound resume receipt by idempotency_key after a process restart.",
+        "inputSchema": {"type":"object","properties":{"idempotency_key":{"type":"string"}},"required":["idempotency_key"],"additionalProperties":False},
+        "handler": query_resume_receipt,
     },
     "run_and_resume": {
         "description": "Run a non-interactive command in background, wait until it finishes or hard_timeout is reached, then resume the same agent chat. This is the agent-resume replacement for notify long-wait flow. For Codex the current thread is frozen from MCP _meta; for OpenCode/Claude pass cwd+marker.",
@@ -1359,8 +1595,12 @@ def cli_main() -> None:
     b=sub.add_parser("resume_bound_target")
     b.add_argument("--target", required=True, help="JSON object with agent, session_id, and cwd")
     b.add_argument("--prompt")
+    b.add_argument("--goal")
     b.add_argument("--result-ref", required=True)
+    b.add_argument("--idempotency-key")
     b.add_argument("--execute", action="store_true")
+    q = sub.add_parser("query_resume_receipt", aliases=["query-receipt"])
+    q.add_argument("--idempotency-key", required=True)
     w = sub.add_parser("_watch"); w.add_argument("--meta", required=True)
     sub.add_parser("mcp")
     args=ap.parse_args()
@@ -1373,7 +1613,9 @@ def cli_main() -> None:
             target = json.loads(args.target)
         except json.JSONDecodeError as exc:
             print(json.dumps({"receipt_id": f"resume-{uuid.uuid4().hex}", "receipt_ref": f"resume-cli-{uuid.uuid4().hex}", "status": "failed", "target": None, "result_ref": args.result_ref, "reason": "invalid", "error": f"invalid target JSON: {exc.msg}"}, ensure_ascii=False, indent=2)); return
-        print(json.dumps(resume_bound_target({"target": target, "prompt": args.prompt, "result_ref": args.result_ref, "execute": args.execute}), ensure_ascii=False, indent=2)); return
+        print(json.dumps(resume_bound_target({"target": target, "prompt": args.prompt, "goal": args.goal, "result_ref": args.result_ref, "idempotency_key": args.idempotency_key, "execute": args.execute}), ensure_ascii=False, indent=2)); return
+    if args.cmd in {"query_resume_receipt", "query-receipt"}:
+        print(json.dumps(query_resume_receipt({"idempotency_key": args.idempotency_key}), ensure_ascii=False, indent=2)); return
 
 if __name__ == "__main__":
     cli_main()

@@ -10,8 +10,18 @@ Today it can:
 
 - build a resume command for the selected client;
 - freeze the target session before a delayed resume starts;
+- accept a frozen target through `resume_bound_target`, persist a durable
+  receipt keyed by `idempotency_key`, and return the same receipt on an exact
+  replay without launching a second turn;
+- read that receipt later with `query_resume_receipt`;
 - run detached background jobs that wait for a process exit or a fixed timer; and
 - persist job state under `~/.local/state/agent-resume` so the watcher can later resume the same chat.
+
+For Codex, a successful detached `codex exec resume <SESSION_ID>` launch is
+reported as `accepted` with reason `resume_process_started`. This is the
+business admission boundary used by Agent Herder. Native JSONL correlation can
+be added later as stricter admission hardening; it is not required for durable
+duplicate prevention.
 
 The current timer path is `wait_and_resume`. It records a timer job, starts a detached watcher, sleeps for the configured duration, and then resumes the frozen target session. `wait_job_status` reports both the watched process state and watcher state separately; timer jobs have no watched PID, so `alive`/`watched_pid_alive` are false while `watcher_alive` can still be true.
 
@@ -62,6 +72,19 @@ Agent Herder owns session lineage and orchestration:
 - select or correlate the right agent session;
 - freeze the session identity before handing off;
 - hand the resolved target to `agent-resume` for the actual wake/resume step.
+
+When Agent Herder and this checkout are siblings, configure its service with
+absolute paths so its working directory cannot change which script is invoked:
+
+```ini
+[Service]
+Environment=AGENT_RESUME_PYTHON=/usr/bin/python3
+Environment=AGENT_RESUME_SCRIPT=/home/roomhacker/agents-projects/agent-resume/agent_resume.py
+```
+
+`AgentResumeClient` treats an `accepted` receipt as resumed. Subsequent calls
+with the same `idempotency_key` query or replay the persisted receipt rather
+than starting another Codex turn.
 
 ## Non-goals
 
