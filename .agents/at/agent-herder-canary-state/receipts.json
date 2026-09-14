@@ -1,0 +1,35 @@
+{
+  "receipts": {
+    "agent-herder-canary-019ff4a1": {
+      "command": [
+        "codex",
+        "exec",
+        "resume",
+        "019ff4a1-96c3-7433-a365-97373093d5f0",
+        "Reply only: AGENT_HERDER_CANARY_TWO. Do not use tools, modify files, or run commands."
+      ],
+      "executed": true,
+      "fingerprint": "c42ca823ea9d469d1741da6b47f882ba41a03ed2197557af9b2bfa6ada86749d",
+      "idempotency_key": "agent-herder-canary-019ff4a1",
+      "launch_returncode": 0,
+      "launch_stderr": "",
+      "launch_stdout": "7481\n",
+      "log_file": "/home/roomhacker/agents-projects/agent-resume/.agents/at/agent-herder-canary-state/runs/20260812T062129Z-codex.log",
+      "pid": 7481,
+      "reason": "resume_process_started",
+      "receipt_id": "resume-7b7f8d1f4f224e7a85c643a4475eb83d",
+      "receipt_ref": "resume-7b7f8d1f4f224e7a85c643a4475eb83d",
+      "result_ref": "agent-herder://canary/same-thread-20260812",
+      "shell_command": "codex exec resume 019ff4a1-96c3-7433-a365-97373093d5f0 'Reply only: AGENT_HERDER_CANARY_TWO. Do not use tools, modify files, or run commands.'",
+      "status": "accepted",
+      "target": {
+        "agent": "codex",
+        "cwd": "/home/roomhacker/agents-projects/agent-resume",
+        "marker": null,
+        "model": null,
+        "session_id": "019ff4a1-96c3-7433-a365-97373093d5f0"
+      }
+    }
+  },
+  "version": 1
+}

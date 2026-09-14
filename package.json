@@ -1,6 +1,6 @@
 {
   "name": "agent-resume-mcp",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "MCP helper that finds and resumes Codex, OpenCode, and Claude Code sessions",
   "type": "module",
   "license": "MIT",
@@ -9,9 +9,12 @@
   },
   "files": [
     "README.md",
+    "CHANGELOG.md",
     "agent_resume.py",
+    "hermes_gateway.py",
     "npm/agent-resume-mcp.js",
     "scripts/install-client-configs.py",
+    "scripts/install-hermes-plugin.py",
     "scripts/test-codex-paid-smoke.py"
   ],
   "scripts": {
