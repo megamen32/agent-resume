@@ -1,0 +1,337 @@
+{
+  "communities": {
+    "0": [
+      "changelog",
+      "codex_skills_delayed_codex_resume_agents_openai_yaml",
+      "codex_skills_delayed_codex_resume_references_agent_resume_contract",
+      "codex_skills_delayed_codex_resume_skill",
+      "concept_agent_identity",
+      "concept_agentherder_boundary",
+      "concept_claude_resume_cli",
+      "concept_codex_resume_cli",
+      "concept_human_request_stack",
+      "concept_marker_rule",
+      "concept_opencode_resume_cli",
+      "concept_scan_message_bodies",
+      "concept_session_id_sources",
+      "docs_assets_readme_hero_png",
+      "docs_human_request",
+      "readme",
+      "readme_ru",
+      "readme_zh",
+      "tool_attach_pid_and_resume",
+      "tool_attach_query_and_resume",
+      "tool_build_resume_command",
+      "tool_find_sessions",
+      "tool_register_agent",
+      "tool_run_and_resume",
+      "tool_wait_and_resume",
+      "tool_wait_job_status"
+    ],
+    "1": [
+      "hermes_gateway",
+      "hermes_gateway_deliver_wake",
+      "hermes_gateway_handle_local_request",
+      "hermes_gateway_hermesgatewayadapter",
+      "hermes_gateway_hermesgatewayadapter_init",
+      "hermes_gateway_hermesgatewayadapter_wake",
+      "hermes_gateway_py_any",
+      "hermes_gateway_rationale_1",
+      "hermes_gateway_rationale_105",
+      "hermes_gateway_rationale_121",
+      "hermes_gateway_rationale_147",
+      "hermes_gateway_rationale_32",
+      "hermes_gateway_rationale_80",
+      "hermes_gateway_receipt_id",
+      "hermes_gateway_register",
+      "hermes_gateway_result_ref",
+      "hermes_gateway_resume_wake",
+      "hermes_gateway_source",
+      "hermes_gateway_target"
+    ],
+    "2": [
+      "agent_resume_bound_target_identity",
+      "agent_resume_build_resume_command",
+      "agent_resume_cli_main",
+      "agent_resume_codex_session_model",
+      "agent_resume_default_prompt",
+      "agent_resume_find_sessions",
+      "agent_resume_get_marker",
+      "agent_resume_now_ms",
+      "agent_resume_rationale_107",
+      "agent_resume_rationale_360",
+      "agent_resume_rationale_764",
+      "agent_resume_rationale_796",
+      "agent_resume_register",
+      "agent_resume_resolve_agent",
+      "agent_resume_resume_agent",
+      "agent_resume_resume_bound_target",
+      "agent_resume_safe_cwd",
+      "agent_resume_validate_marker"
+    ],
+    "3": [
+      "package",
+      "package_bin",
+      "package_bin_agent_resume_mcp",
+      "package_description",
+      "package_files",
+      "package_license",
+      "package_name",
+      "package_scripts",
+      "package_scripts_test_codex_paid",
+      "package_type",
+      "package_version",
+      "ref_agent_resume_py",
+      "ref_changelog_md",
+      "ref_npm_agent_resume_mcp_js",
+      "ref_readme_md",
+      "ref_scripts_install_client_configs_py",
+      "ref_scripts_test_codex_paid_smoke_py"
+    ],
+    "4": [
+      "scripts_install_client_configs",
+      "scripts_install_client_configs_codex_block",
+      "scripts_install_client_configs_dump_json",
+      "scripts_install_client_configs_find_matching_brace",
+      "scripts_install_client_configs_find_object_for_key",
+      "scripts_install_client_configs_find_string_key",
+      "scripts_install_client_configs_home_path",
+      "scripts_install_client_configs_install_claude",
+      "scripts_install_client_configs_install_codex",
+      "scripts_install_client_configs_install_opencode",
+      "scripts_install_client_configs_load_jsonc",
+      "scripts_install_client_configs_load_jsonc_text",
+      "scripts_install_client_configs_main",
+      "scripts_install_client_configs_py_any",
+      "scripts_install_client_configs_py_path",
+      "scripts_install_client_configs_remove_trailing_commas",
+      "scripts_install_client_configs_strip_jsonc"
+    ],
+    "5": [
+      "agent_resume_claude_marker_in_body",
+      "agent_resume_claude_project_dir",
+      "agent_resume_claude_sessions",
+      "agent_resume_codex_marker_in_body",
+      "agent_resume_codex_sessions",
+      "agent_resume_match_score",
+      "agent_resume_opencode_sessions",
+      "agent_resume_parse_time",
+      "agent_resume_py_path",
+      "agent_resume_rationale_241",
+      "agent_resume_rationale_274",
+      "agent_resume_rationale_541",
+      "agent_resume_sessioncandidate",
+      "agent_resume_text_has"
+    ],
+    "6": [
+      "agent_resume_find_pids_by_query",
+      "agent_resume_freeze_resume_target",
+      "agent_resume_job_paths",
+      "agent_resume_now_iso",
+      "agent_resume_parse_duration_seconds",
+      "agent_resume_py_any",
+      "agent_resume_start_watcher",
+      "agent_resume_tool_attach_pid_and_resume",
+      "agent_resume_tool_attach_query_and_resume",
+      "agent_resume_tool_run_and_resume",
+      "agent_resume_tool_wait_and_resume",
+      "agent_resume_write_json"
+    ],
+    "7": [
+      "agent_resume",
+      "agent_resume_agent_resume_script",
+      "agent_resume_default_agent",
+      "agent_resume_default_agent_or_none",
+      "agent_resume_handle",
+      "agent_resume_load_config",
+      "agent_resume_mcp_main",
+      "agent_resume_normalize_agent",
+      "agent_resume_reply",
+      "agent_resume_tools_for_client",
+      "exception"
+    ],
+    "8": [
+      "tests_test_wait_job_status",
+      "tests_test_wait_job_status_load_agent_resume",
+      "tests_test_wait_job_status_py_any",
+      "tests_test_wait_job_status_rationale_1",
+      "tests_test_wait_job_status_rationale_15",
+      "tests_test_wait_job_status_rationale_29",
+      "tests_test_wait_job_status_rationale_32",
+      "tests_test_wait_job_status_waitjobstatustests",
+      "tests_test_wait_job_status_waitjobstatustests_test_timer_reports_live_watcher_without_watched_process"
+    ],
+    "9": [
+      "tests_test_resume_bound_target",
+      "tests_test_resume_bound_target_load_agent_resume",
+      "tests_test_resume_bound_target_py_any",
+      "tests_test_resume_bound_target_rationale_1",
+      "tests_test_resume_bound_target_resumeboundtargettests",
+      "tests_test_resume_bound_target_resumeboundtargettests_test_rejects_missing_bound_target_without_fallback_lookup",
+      "tests_test_resume_bound_target_resumeboundtargettests_test_returns_failed_receipt_when_launch_is_rejected",
+      "tests_test_resume_bound_target_resumeboundtargettests_test_uses_only_frozen_identity_for_each_supported_agent"
+    ],
+    "10": [
+      "scripts_test_codex_paid_smoke",
+      "scripts_test_codex_paid_smoke_extract_structured_result",
+      "scripts_test_codex_paid_smoke_fail",
+      "scripts_test_codex_paid_smoke_json_lines",
+      "scripts_test_codex_paid_smoke_main",
+      "scripts_test_codex_paid_smoke_py_any"
+    ],
+    "11": [
+      "tests_test_hermes_gateway",
+      "tests_test_hermes_gateway_load_module",
+      "tests_test_hermes_gateway_test_agent_resume_adapter_sends_only_locator_and_opaque_reference",
+      "tests_test_hermes_gateway_test_live_gateway_deliver_wake_uses_canonical_source_and_sanitized_text",
+      "tests_test_hermes_gateway_test_local_boundary_requires_bearer_and_rejects_free_form_payload",
+      "tests_test_hermes_gateway_test_register_exposes_adapter_not_heartbeat"
+    ],
+    "12": [
+      "agent_resume_is_pid_alive",
+      "agent_resume_rationale_1087",
+      "agent_resume_read_json",
+      "agent_resume_tool_wait_job_status",
+      "agent_resume_watcher_main"
+    ],
+    "13": [
+      "npm_agent_resume_mcp",
+      "npm_agent_resume_mcp_child",
+      "npm_agent_resume_mcp_root"
+    ],
+    "14": [
+      "agent_resume_extract_mcp_session_id",
+      "agent_resume_rationale_128"
+    ]
+  },
+  "cohesion": {
+    "0": 0.12615384615384614,
+    "1": 0.21052631578947367,
+    "2": 0.19607843137254902,
+    "3": 0.11764705882352941,
+    "4": 0.3014705882352941,
+    "5": 0.26373626373626374,
+    "6": 0.4393939393939394,
+    "7": 0.2909090909090909,
+    "8": 0.25,
+    "9": 0.35714285714285715,
+    "10": 0.6,
+    "11": 0.6,
+    "12": 0.5,
+    "13": 0.6666666666666666,
+    "14": 1.0
+  },
+  "gods": [
+    {
+      "id": "readme",
+      "label": "agent-resume README (English)",
+      "degree": 20
+    },
+    {
+      "id": "agent_resume_resume_agent",
+      "label": "resume_agent()",
+      "degree": 15
+    },
+    {
+      "id": "agent_resume_tool_attach_pid_and_resume",
+      "label": "tool_attach_pid_and_resume()",
+      "degree": 11
+    },
+    {
+      "id": "agent_resume_find_sessions",
+      "label": "find_sessions()",
+      "degree": 10
+    },
+    {
+      "id": "agent_resume_safe_cwd",
+      "label": "safe_cwd()",
+      "degree": 9
+    },
+    {
+      "id": "agent_resume_codex_sessions",
+      "label": "codex_sessions()",
+      "degree": 9
+    },
+    {
+      "id": "agent_resume_tool_run_and_resume",
+      "label": "tool_run_and_resume()",
+      "degree": 9
+    },
+    {
+      "id": "agent_resume_tool_wait_and_resume",
+      "label": "tool_wait_and_resume()",
+      "degree": 9
+    },
+    {
+      "id": "hermes_gateway_deliver_wake",
+      "label": "deliver_wake()",
+      "degree": 9
+    },
+    {
+      "id": "scripts_install_client_configs_install_opencode",
+      "label": "install_opencode()",
+      "degree": 9
+    }
+  ],
+  "surprises": [
+    {
+      "source": "agent-resume developer workspace hero image",
+      "target": "agent-resume README (English)",
+      "source_files": [
+        "docs/assets/readme-hero.png",
+        "README.md"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "crosses file types (doc \u2194 image); connects across different repos/directories"
+    },
+    {
+      "source": "agent-resume README (Russian)",
+      "target": "agent-resume developer workspace hero image",
+      "source_files": [
+        "README.ru.md",
+        "docs/assets/readme-hero.png"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "crosses file types (doc \u2194 image); connects across different repos/directories"
+    },
+    {
+      "source": "agent-resume README (Chinese)",
+      "target": "agent-resume developer workspace hero image",
+      "source_files": [
+        "README.zh.md",
+        "docs/assets/readme-hero.png"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "crosses file types (doc \u2194 image); connects across different repos/directories"
+    },
+    {
+      "source": "agent-resume README (English)",
+      "target": "agent-resume in the Human Request stack",
+      "source_files": [
+        "README.md",
+        "docs/human-request.md"
+      ],
+      "confidence": "INFERRED",
+      "relation": "conceptually_related_to",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories"
+    },
+    {
+      "source": "agent-resume README (English)",
+      "target": "delayed-codex-resume skill",
+      "source_files": [
+        "README.md",
+        ".codex/skills/delayed-codex-resume/SKILL.md"
+      ],
+      "confidence": "INFERRED",
+      "relation": "references",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories"
+    }
+  ],
+  "tokens": {
+    "input": 10905,
+    "output": 6358
+  }
+}

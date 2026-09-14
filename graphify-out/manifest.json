@@ -1,0 +1,92 @@
+{
+  "agent_resume.py": {
+    "mtime": 1785806552.6449924,
+    "ast_hash": "dd097dc091d46356826f2e339f398995",
+    "semantic_hash": "dd097dc091d46356826f2e339f398995"
+  },
+  "hermes_gateway.py": {
+    "mtime": 1785812677.2196026,
+    "ast_hash": "a3506d72f951834f68f91c5dc5ce9157",
+    "semantic_hash": "a3506d72f951834f68f91c5dc5ce9157"
+  },
+  "npm/agent-resume-mcp.js": {
+    "mtime": 1783213010.0136535,
+    "ast_hash": "bf67569da0f14ba246af71eb91b0ad79",
+    "semantic_hash": "bf67569da0f14ba246af71eb91b0ad79"
+  },
+  "package.json": {
+    "mtime": 1784203572.220516,
+    "ast_hash": "53b0edf22275d1343dadc5640cf17662",
+    "semantic_hash": "53b0edf22275d1343dadc5640cf17662"
+  },
+  "scripts/install-client-configs.py": {
+    "mtime": 1783222875.2661414,
+    "ast_hash": "a28831e5e19689f1a74e77831ad46720",
+    "semantic_hash": "a28831e5e19689f1a74e77831ad46720"
+  },
+  "scripts/test-codex-paid-smoke.py": {
+    "mtime": 1784029372.3608165,
+    "ast_hash": "d0cf97b091ba91f71defe58d15e10b56",
+    "semantic_hash": "d0cf97b091ba91f71defe58d15e10b56"
+  },
+  "tests/test_hermes_gateway.py": {
+    "mtime": 1785812677.2206025,
+    "ast_hash": "d3defe207cde438f2fd70d5432d94505",
+    "semantic_hash": "d3defe207cde438f2fd70d5432d94505"
+  },
+  "tests/test_resume_bound_target.py": {
+    "mtime": 1785806579.5468137,
+    "ast_hash": "85f95cb73edbbf5f1c4b17aae35c5503",
+    "semantic_hash": "85f95cb73edbbf5f1c4b17aae35c5503"
+  },
+  "tests/test_wait_job_status.py": {
+    "mtime": 1784038012.2106287,
+    "ast_hash": "2377c7df3c8fad90c839f8699dc14595",
+    "semantic_hash": "2377c7df3c8fad90c839f8699dc14595"
+  },
+  ".codex/skills/delayed-codex-resume/SKILL.md": {
+    "mtime": 1784029575.8038654,
+    "ast_hash": "12402a009582a852b203ffd46dcc4a0b",
+    "semantic_hash": "12402a009582a852b203ffd46dcc4a0b"
+  },
+  ".codex/skills/delayed-codex-resume/agents/openai.yaml": {
+    "mtime": 1784029372.3588164,
+    "ast_hash": "42f78e14200019672a315d800b758b02",
+    "semantic_hash": "42f78e14200019672a315d800b758b02"
+  },
+  ".codex/skills/delayed-codex-resume/references/agent-resume-contract.md": {
+    "mtime": 1784029575.8048656,
+    "ast_hash": "e2f4d8a10e64d25a9180899ddd64779f",
+    "semantic_hash": "e2f4d8a10e64d25a9180899ddd64779f"
+  },
+  "CHANGELOG.md": {
+    "mtime": 1784203611.717558,
+    "ast_hash": "2930f7a4efddfff9bd562b01f9d4ca9c",
+    "semantic_hash": "2930f7a4efddfff9bd562b01f9d4ca9c"
+  },
+  "README.md": {
+    "mtime": 1784205398.42865,
+    "ast_hash": "103bc638ffb42bf257d47ed3b72b7888",
+    "semantic_hash": "103bc638ffb42bf257d47ed3b72b7888"
+  },
+  "README.ru.md": {
+    "mtime": 1784204875.2549884,
+    "ast_hash": "d0bf4126ce203e2f86f4305c3c63f065",
+    "semantic_hash": "d0bf4126ce203e2f86f4305c3c63f065"
+  },
+  "README.zh.md": {
+    "mtime": 1784204875.2559884,
+    "ast_hash": "25fb7edd30999deb6ebfc84a4d455761",
+    "semantic_hash": "25fb7edd30999deb6ebfc84a4d455761"
+  },
+  "docs/human-request.md": {
+    "mtime": 1785789431.2425587,
+    "ast_hash": "c7a7cce9dc098bb134ea73c8ca9907a9",
+    "semantic_hash": "c7a7cce9dc098bb134ea73c8ca9907a9"
+  },
+  "docs/assets/readme-hero.png": {
+    "mtime": 1784204714.419036,
+    "ast_hash": "c45be36c1b25a0e6c360ebcce826c717",
+    "semantic_hash": "c45be36c1b25a0e6c360ebcce826c717"
+  }
+}
