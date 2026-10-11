@@ -14,6 +14,11 @@ import os
 import re
 import uuid
 import logging
+import hashlib
+import sqlite3
+import time
+from contextlib import contextmanager
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Mapping
 from urllib.request import Request, urlopen
@@ -26,7 +31,185 @@ _HOST_ENV = "AGENT_RESUME_HERMES_HOST"
 _PORT_ENV = "AGENT_RESUME_HERMES_PORT"
 _PATH = "/v1/agent-resume/wake"
 _bridge: "Bridge | None" = None
+_ctx: Any = None
+_TASK_ACK_SECONDS = 2.0
 logger = logging.getLogger(__name__)
+
+
+def _task_settings() -> dict[str, Any]:
+    from hermes_cli.plugins import _plugin_home_scope
+    from hermes_cli.config import load_config_readonly
+    with _plugin_home_scope(_ctx._manager.home_path):
+        config = load_config_readonly() or {}
+    entry = config.get("plugins", {}).get("entries", {}).get("agent-resume", {})
+    return {"session_key": entry.get("gateway_task_session_key"), "model": config.get("model", {}).get("default")}
+
+
+@contextmanager
+def _task_db():
+    home = Path(_ctx._manager.home_path) / "state" / "agent-resume"
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = home / "gateway-tasks.sqlite3"
+    # Create owner-only before SQLite opens it. No prompts or credentials are stored.
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+    os.close(fd)
+    db = sqlite3.connect(path, timeout=2)
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE IF NOT EXISTS binding (session_key TEXT PRIMARY KEY, session_id TEXT, name TEXT, cwd TEXT)")
+    db.execute("CREATE TABLE IF NOT EXISTS inputs (input_id TEXT PRIMARY KEY, session_key TEXT, session_id TEXT, cwd TEXT, digest TEXT, marker TEXT UNIQUE, state TEXT, turn_id TEXT, model TEXT)")
+    try:
+        with db:
+            yield db
+    finally:
+        db.close()
+
+
+def _task_failed(error: str) -> dict[str, Any]:
+    return {"ok": False, "notSubmitted": True, "error": error}
+
+
+def _task_receipt(row: Mapping[str, Any]) -> dict[str, Any]:
+    admitted = row["state"] == "admitted"
+    return {"ok": admitted, "admitted": admitted, "pending": True, "completed": False, "inputId": row["input_id"],
+            "turnId": row["turn_id"], "model": row["model"], "nativeSessionId": row["session_id"],
+            "sessionKey": row["session_key"], "state": row["state"],
+            **({} if admitted else {"admissionUnknown": True, "pending": True, "nonRetryable": True,
+                                   "error": "Native turn admission is not yet observed; query this input ID only"})}
+
+
+def _task_existing(row: Mapping[str, Any], key: str, digest: str) -> dict[str, Any]:
+    receipt = _task_receipt(row)
+    if row["session_key"] != key or row["digest"] != digest:
+        # A conflicting payload does not undo the original input's native admission.
+        receipt.update(ok=False, nonRetryable=True, error="Input ID conflicts with its immutable payload")
+    return receipt
+
+
+def _task_session(row: Mapping[str, Any], entry: Any, settings: Mapping[str, Any]) -> dict[str, Any]:
+    return {"id": row["session_key"], "harness": "hermes", "title": row["name"], "cwd": row["cwd"],
+            "status": "running" if getattr(entry, "active_turn_token", None) else "idle",
+            "lastActivity": str(getattr(entry, "updated_at", "")), "needsPermission": False,
+            "model": (getattr(entry, "model_override", None) or {}).get("model") or settings.get("model"),
+            "meta": {"transport": "hermes-gateway-task", "sessionKey": row["session_key"],
+                     "nativeSessionId": row["session_id"], "sessionId": row["session_id"],
+                     "origin": entry.origin.to_dict() if hasattr(entry.origin, "to_dict") else {
+                         "platform": entry.origin.platform.value, "chat_id": entry.origin.chat_id,
+                         "thread_id": entry.origin.thread_id}, "cwdSource": "task-terminal-override-on-admission"}}
+
+
+async def handle_task_request(body: Mapping[str, Any], *, authorization: str | None, gateway: Any) -> dict[str, Any]:
+    """Authenticated task intake on the existing bridge; ctx is the only native writer.
+
+    Reservation precedes scheduling. A crash/timeout is query-only, never permission
+    to inject again. Native admission is observed by the supported agent prologue hook.
+    """
+    expected = os.environ.get(_TOKEN_ENV, "")
+    if not expected or not hmac.compare_digest(str(authorization or ""), f"Bearer {expected}"):
+        return _task_failed("unauthorized")
+    try:
+        if _ctx is None or _ctx._manager._cli_ref is not None:
+            return _task_failed("Gateway plugin context unavailable; CLI injection is forbidden")
+        settings = _task_settings()
+        key = settings.get("session_key")
+        if not key or not isinstance(body, Mapping):
+            return _task_failed("Explicit gateway task session key is not configured")
+        op = body.get("op")
+        fields = {"home": {"op"}, "bind": {"op", "name", "cwd"}, "find": {"op", "name", "cwd"}, "session": {"op", "session_key"},
+                  "send": {"op", "session_key", "input_id", "message"}, "receipt": {"op", "session_key", "input_id"}}
+        if op not in fields or set(body) != fields[op]:
+            return _task_failed("Invalid task operation fields")
+        if op in {"send", "receipt", "session"} and body["session_key"] != key:
+            return _task_failed("Target is not the configured home session")
+        with _task_db() as db:
+            if op == "receipt":
+                row = db.execute("SELECT * FROM inputs WHERE input_id=? AND session_key=?", (body["input_id"], key)).fetchone()
+                return _task_receipt(row) if row else {"ok": True, "state": "not_found"}
+            if op == "send":
+                ident, message = body["input_id"], body["message"]
+                if not isinstance(ident, str) or not 1 <= len(ident) <= 256 or any(ord(c)<32 for c in ident):
+                    return _task_failed("A bounded stable input ID is required")
+                if not isinstance(message, str) or not message.strip() or len(message.encode()) > 32768:
+                    return _task_failed("A bounded non-empty task message is required")
+                digest = hashlib.sha256(message.encode()).hexdigest()
+                row = db.execute("SELECT * FROM inputs WHERE input_id=?", (ident,)).fetchone()
+                if row:
+                    return _task_existing(row, key, digest)
+            entry = await gateway.async_session_store.lookup_by_session_key(key)
+            if entry is None or entry.origin is None or not gateway._plugin_injection_accepting():
+                return _task_failed("Live stored home session unavailable")
+            db.execute("BEGIN IMMEDIATE")
+            if op == "send":
+                prior = db.execute("SELECT * FROM inputs WHERE input_id=?", (ident,)).fetchone()
+                if prior:
+                    return _task_existing(prior, key, digest)
+            binding = db.execute("SELECT * FROM binding WHERE session_key=?", (key,)).fetchone()
+            if binding and binding["session_id"] != entry.session_id:
+                return _task_failed("Home native session binding changed; explicit reconciliation required")
+            if op in {"bind", "find"}:
+                name, cwd = body["name"], body["cwd"]
+                if not isinstance(name, str) or not name.strip() or len(name)>512 or any(ord(c)<32 for c in name):
+                    return _task_failed("Invalid task name")
+                if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
+                    return _task_failed("Existing absolute task cwd is required")
+                cwd = str(Path(cwd).resolve())
+                if op == "find" and (not binding or binding["name"] != name or binding["cwd"] != cwd):
+                    return {"ok": True, "session": None}
+                if op == "bind":
+                    if getattr(entry, "active_turn_token", None) or gateway._is_session_running(key):
+                        return _task_failed("Home session has an active writer")
+                    if db.execute("SELECT 1 FROM inputs WHERE session_key=? AND state IN ('reserved','scheduled')", (key,)).fetchone():
+                        return _task_failed("Home session has an unconfirmed input; query only")
+                    db.execute("INSERT OR REPLACE INTO binding VALUES (?,?,?,?)", (key, entry.session_id, name, cwd))
+                    binding = db.execute("SELECT * FROM binding WHERE session_key=?", (key,)).fetchone()
+                return {"ok": True, "session": _task_session(binding, entry, settings)}
+            if op in {"session", "home"}:
+                row = binding or {"session_key": key, "session_id": entry.session_id, "name": key, "cwd": settings.get("cwd") or str(Path.cwd())}
+                return {"ok": True, "session": _task_session(row, entry, settings)}
+            if not binding:
+                return _task_failed("Bind the task to the existing home session first")
+            if getattr(entry, "active_turn_token", None) or gateway._is_session_running(key):
+                return _task_failed("Home session has an active writer")
+            if db.execute("SELECT 1 FROM inputs WHERE session_key=? AND state IN ('reserved','scheduled')", (key,)).fetchone():
+                return _task_failed("Home session has an unconfirmed input; query only")
+            marker = f"[Agent Herder task {uuid.uuid4().hex}]"
+            db.execute("INSERT INTO inputs VALUES (?,?,?,?,?,?,'reserved',NULL,NULL)", (ident,key,entry.session_id,binding["cwd"],digest,marker))
+        # Native call must occur only AFTER the durable reservation commits.
+        try:
+            scheduled = _ctx.inject_message(f"{marker}\nРабочая папка задачи: {binding['cwd']}\n{message}", session_key=key)
+        except Exception:
+            scheduled = None  # unknown; immutable reservation is the no-replay fence
+        with _task_db() as db:
+            if scheduled is False:
+                db.execute("DELETE FROM inputs WHERE input_id=? AND state='reserved'", (ident,))
+                return _task_failed("Supported gateway injection refused before scheduling")
+            if scheduled is True:
+                db.execute("UPDATE inputs SET state='scheduled' WHERE input_id=? AND state='reserved'", (ident,))
+        until = time.monotonic() + _TASK_ACK_SECONDS
+        while True:
+            with _task_db() as db:
+                row = db.execute("SELECT * FROM inputs WHERE input_id=?", (ident,)).fetchone()
+            if row["state"] == "admitted" or time.monotonic() >= until:
+                return _task_receipt(row)
+            await asyncio.sleep(.025)
+    except Exception:
+        # This branch can include disk/receipt failure AFTER injection: never assert no submission.
+        return {"ok": False, "admissionUnknown": True, "nonRetryable": True, "error": "Task receipt unavailable; query the same input ID only"}
+
+
+def _on_task_pre_llm_call(*, session_id: str, turn_id: str, user_message: Any, model: str, **_: Any) -> None:
+    """Observe actual native prologue, without changing the model or starting a turn."""
+    if _ctx is None or not isinstance(user_message, str):
+        return
+    match = re.search(r"\[Agent Herder task [0-9a-f]{32}\]", user_message)
+    if not match:
+        return
+    with _task_db() as db:
+        row = db.execute("SELECT * FROM inputs WHERE marker=? AND session_id=? AND state IN ('reserved','scheduled')", (match.group(),session_id)).fetchone()
+        if not row:
+            return
+        from tools.terminal_tool import register_task_env_overrides
+        register_task_env_overrides(session_id, {"cwd": row["cwd"]})
+        db.execute("UPDATE inputs SET state='admitted',turn_id=?,model=? WHERE input_id=?", (turn_id,model,row["input_id"]))
 
 
 def _receipt_id() -> str:
@@ -148,8 +331,16 @@ async def start_bridge(gateway: Any) -> Bridge | None:
                 body = {}
             receipt = await handle_local_request(body, authorization=request.headers.get("Authorization"), gateway=gateway)
             return web.json_response(receipt, status=200 if receipt["status"] == "accepted" else 400)
-        app = web.Application(client_max_size=4096)
+        async def task(request: Any) -> Any:
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            receipt = await handle_task_request(body, authorization=request.headers.get("Authorization"), gateway=gateway)
+            return web.json_response(receipt, status=200)
+        app = web.Application(client_max_size=65536)
         app.router.add_post(_PATH, wake)
+        app.router.add_post("/v1/agent-resume/task", task)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, host=os.environ.get(_HOST_ENV, "127.0.0.1"), port=port)
@@ -183,4 +374,7 @@ class HermesGatewayAdapter:
 
 
 def register(ctx: Any) -> None:
+    global _ctx
+    _ctx = ctx
     ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
+    ctx.register_hook("pre_llm_call", _on_task_pre_llm_call)
