@@ -122,3 +122,11 @@ Legacy input без per-turn hook evidence сохраняет `modelAtAdmission`
 неизвестен; latest session runtime не приписывается прежнему input задним числом.
 DB migration добавляет nullable columns без изменения admitted/unknown fences.
 Сырые provider payload/base_url/credentials не сохраняются и не выдаются.
+
+Model delta source proof: official post-response producer → authenticated HTTP →
+durable exact-turn receipt, fallback/legacy row/restart/no replay и scoped installer
+проверены. 12 Python scenarios прошли в Hermes interpreter; installer import FAIL
+из-за параллельного official update/PyYAML сохранён, installer + legacy DB migration
+отдельно2/2 PASS существующим системным Python. Herder build +8/8 Vitest PASS.
+Bounded windows54.714s включая setup, RAM max2GiB/swap0/OOM0. Не заявляется live
+acceptance нового metadata hook до Root reload после завершения official updater.

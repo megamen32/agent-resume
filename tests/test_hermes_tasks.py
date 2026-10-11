@@ -289,3 +289,20 @@ def test_effective_fallback_is_exact_turn_evidence_not_selected_or_later_session
         finally:
             await bridge.runner.cleanup();mod._bridge=None
     with patch.dict(os.environ,{'AGENT_RESUME_HERMES_TOKEN':'test-token','AGENT_RESUME_HERMES_PORT':str(port)}):asyncio.run(run())
+
+
+def test_legacy_admitted_row_migrates_without_inferred_actual_model(tmp_path):
+    """Fast unit, expected .1s/max 2s: old durable input survives nullable migration."""
+    import sqlite3
+    mod=load_module();gateway,ctx,entry=setup(mod,tmp_path)
+    folder=tmp_path/'state/agent-resume';folder.mkdir(parents=True)
+    with sqlite3.connect(folder/'gateway-tasks.sqlite3') as db:
+        db.execute("CREATE TABLE inputs (input_id TEXT PRIMARY KEY, session_key TEXT, session_id TEXT, cwd TEXT, digest TEXT, marker TEXT UNIQUE, state TEXT, turn_id TEXT, model TEXT)")
+        db.execute("INSERT INTO inputs VALUES (?,?,?,?,?,?,'admitted',?,?)",('legacy',KEY,SID,str(tmp_path),'digest','legacy-marker','old-turn','glm-5.3-flash'))
+    ctx.inject_message=lambda *a,**k: (_ for _ in ()).throw(AssertionError('replay'))
+    async def run():
+        receipt=await request(mod,gateway,op='receipt',session_key=KEY,input_id='legacy')
+        assert receipt['admitted'] and receipt['turnId']=='old-turn' and receipt['pending'] and not receipt['completed']
+        assert receipt['modelAtAdmission']=='glm-5.3-flash'
+        assert receipt['model'] is None and receipt['effectiveModel'] is None and receipt['selectedModel'] is None
+    with patch.dict(os.environ,{'AGENT_RESUME_HERMES_TOKEN':'test-token'}):asyncio.run(run())
