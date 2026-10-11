@@ -21,4 +21,4 @@ def test_installer_merges_supported_entry_and_preserves_live_config(tmp_path):
     assert result['plugins']['enabled']==['other','agent-resume'] and result['plugins']['disabled']==[]
     plugin=mod.install(tmp_path,Path(__file__).parents[1]/"hermes_gateway.py")
     assert (plugin/'__init__.py').resolve()==(Path(__file__).parents[1]/'hermes_gateway.py').resolve()
-    assert yaml.safe_load((plugin/'plugin.yaml').read_text())['hooks']==['pre_gateway_dispatch','pre_llm_call']
+    assert yaml.safe_load((plugin/'plugin.yaml').read_text())['hooks']==['pre_gateway_dispatch','pre_llm_call','post_api_request']

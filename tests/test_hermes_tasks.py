@@ -18,12 +18,16 @@ SID = "20260909_220106_70ff6a6b"
 
 def setup(mod, tmp_path):
     sys.path.insert(0, os.environ.get("HERMES_SOURCE", str(Path.home()/".hermes/hermes-agent")))
-    entry = SimpleNamespace(session_id=SID, model_override={"model": "glm-5.3-flash"}, active_turn_token=None,
+    entry = SimpleNamespace(session_id=SID, model_override={"model": "glm-5.3-flash", "provider": "zai"}, active_turn_token=None,
                             origin=SimpleNamespace(platform=SimpleNamespace(value="telegram"), chat_id="-1004360838692", thread_id="9"))
     async def lookup(key):
         return entry if key == KEY else None
     gateway = SimpleNamespace(async_session_store=SimpleNamespace(lookup_by_session_key=lookup),
                               _plugin_injection_accepting=lambda: True, _is_session_running=lambda key: False)
+    async def get_session(sid):
+        assert sid == SID
+        return {"model": "glm-5.3-flash", "model_config": json.dumps({"gateway_runtime": {"provider": "zai", "fallback_active": False}})}
+    gateway._session_db = SimpleNamespace(get_session=get_session)
     ctx = SimpleNamespace(_manager=SimpleNamespace(home_path=tmp_path, _cli_ref=None))
     mod._ctx = ctx
     mod._task_settings = lambda: {"session_key": KEY, "model": "MiniMax-M3", "cwd": str(tmp_path)}
@@ -54,7 +58,8 @@ def test_native_ack_is_fast_and_duplicate_survives_restart(tmp_path):
         receipt = await asyncio.wait_for(request(mod, gateway, **body), 1)
         assert receipt["admitted"] is True and receipt["completed"] is False
         assert receipt["turnId"] == "native-turn"
-        assert receipt["model"] == "glm-5.3-flash"
+        assert receipt["model"] is None and receipt["modelAtAdmission"] == "glm-5.3-flash"
+        assert receipt["selectedModel"] == "glm-5.3-flash"
         assert await request(mod, gateway, **body) == receipt
         restarted = load_module(); setup(restarted, tmp_path)[1].inject_message = lambda *a, **k: (_ for _ in ()).throw(AssertionError("replay"))
         assert await request(restarted, gateway, **body) == receipt
@@ -212,3 +217,75 @@ def test_atomic_binding_generation_fences_a_b_cached_a_and_aba(tmp_path):
         # Original admission is still query-only/replay-safe after binding changes.
         assert (await request(mod,gateway,**body))['admitted'] and len(calls)==3
     with patch.dict(os.environ,{'AGENT_RESUME_HERMES_TOKEN':'test-token'}):asyncio.run(run())
+
+
+def test_effective_fallback_is_exact_turn_evidence_not_selected_or_later_session(tmp_path):
+    """Real ingress + official post-response producer; expected 1s/max 5s.
+
+    Defect: prologue/selected GLM claimed as actual despite MiniMax fallback.
+    Session runtime is last-session evidence; legacy input must stay unknown.
+    """
+    import socket
+    import aiohttp
+    from agent.turn_response_intake import _fire_post_api_request_hook
+    mod=load_module();gateway,ctx,entry=setup(mod,tmp_path)
+    runtime={"model":"MiniMax-M3", "model_config":json.dumps({"gateway_runtime":{"provider":"minimax","fallback_active":True}})}
+    async def get_session(sid):
+        assert sid==SID
+        return runtime
+    gateway._session_db.get_session=get_session
+    calls=[]
+    def inject(content,**kw):
+        calls.append(content)
+        mod._on_task_pre_llm_call(session_id=SID,turn_id='fallback-turn',user_message=content,model='glm-5.3-flash')
+        return True
+    ctx.inject_message=inject
+    # This official producer reads agent.model/provider AFTER fallback; no response body retained.
+    agent=SimpleNamespace(session_id=SID,platform='telegram',model='MiniMax-M3',provider='minimax',base_url='unused',api_mode='chat_completions',
+        _api_response_payload_for_hook=lambda *a,**k:{},_usage_summary_for_api_request_hook=lambda *a:{})
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+    async def run():
+        bridge=await mod.start_bridge(gateway)
+        try:
+            async with aiohttp.ClientSession(headers={'Authorization':'Bearer test-token'}) as client:
+                url=f'http://127.0.0.1:{port}/v1/agent-resume/task'
+                async def post(body):
+                    async with client.post(url,json=body) as response:
+                        assert response.status==200
+                        return await response.json()
+                home=(await post({'op':'home'}))['session']
+                assert home['model']=='MiniMax-M3' and home['meta']['selectedModel']=='glm-5.3-flash'
+                assert home['meta']['selectedProvider']=='zai' and home['meta']['effectiveModel']['provider']=='minimax'
+                bound=(await post({'op':'bind','name':'fallback','cwd':str(tmp_path)}))['session']
+                body={'op':'send','session_key':KEY,'input_id':'fallback-one','message':'Read only','expected_binding':bound['meta']['taskBinding']}
+                admitted=await post(body)
+                assert admitted['admitted'] and admitted['pending'] and not admitted['completed']
+                assert admitted['model'] is None and admitted['modelAtAdmission']=='glm-5.3-flash'
+                with patch('hermes_cli.lifecycle.has_hook',return_value=True), patch('hermes_cli.lifecycle.invoke_hook',side_effect=lambda name,**kw:mod._on_task_post_api_request(**kw)), patch('agent.conversation_loop._moa_reference_metrics_for_hook',return_value=[]):
+                    _fire_post_api_request_hook(agent,SimpleNamespace(model='provider-alias'),SimpleNamespace(content='done',tool_calls=[]),'stop',api_messages=[],api_call_count=1,api_duration=.01,api_start_time=0,api_request_id='test',effective_task_id='task',turn_id='fallback-turn')
+                settled=await post({'op':'receipt','session_key':KEY,'input_id':'fallback-one'})
+                assert settled['model']=='MiniMax-M3' and settled['selectedModel']=='glm-5.3-flash'
+                assert settled['effectiveModel']=={'model':'MiniMax-M3','provider':'minimax','source':'native-post-api-request','turnId':'fallback-turn'}
+                assert settled['pending'] and not settled['completed']
+                # A later human turn / other native SID cannot overwrite this input's evidence.
+                mod._on_task_post_api_request(session_id=SID,turn_id='human-followup',model='other',provider='other')
+                mod._on_task_post_api_request(session_id='foreign',turn_id='fallback-turn',model='other',provider='other')
+                runtime['model']='later-model'
+                assert await post(body)==settled and len(calls)==1
+                assert (await post({'op':'home'}))['session']['model']=='later-model'
+                restarted=load_module();setup(restarted,tmp_path)
+                assert await request(restarted,gateway,op='receipt',session_key=KEY,input_id='fallback-one')==settled
+                # Historical receipt has only prologue model: never fill actual from latest home.
+                with mod._task_db() as db:
+                    db.execute("UPDATE inputs SET effective_model=NULL,effective_provider=NULL,selected_model=NULL WHERE input_id='fallback-one'")
+                legacy=await post({'op':'receipt','session_key':KEY,'input_id':'fallback-one'})
+                assert legacy['model'] is None and legacy['effectiveModel'] is None
+                assert legacy['modelAtAdmission']=='glm-5.3-flash' and legacy['admitted']
+                gateway._session_db=None
+                missing=(await post({'op':'home'}))['session']
+                assert missing['model'] is None and missing['meta']['selectedModel']=='glm-5.3-flash'
+                assert len(calls)==1
+        finally:
+            await bridge.runner.cleanup();mod._bridge=None
+    with patch.dict(os.environ,{'AGENT_RESUME_HERMES_TOKEN':'test-token','AGENT_RESUME_HERMES_PORT':str(port)}):asyncio.run(run())

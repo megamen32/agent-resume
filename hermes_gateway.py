@@ -59,6 +59,10 @@ def _task_db():
     if "generation" not in {column[1] for column in db.execute("PRAGMA table_info(binding)")}:
         db.execute("ALTER TABLE binding ADD COLUMN generation TEXT")
     db.execute("CREATE TABLE IF NOT EXISTS inputs (input_id TEXT PRIMARY KEY, session_key TEXT, session_id TEXT, cwd TEXT, digest TEXT, marker TEXT UNIQUE, state TEXT, turn_id TEXT, model TEXT)")
+    columns = {column[1] for column in db.execute("PRAGMA table_info(inputs)")}
+    for name in ("selected_model", "effective_model", "effective_provider"):
+        if name not in columns:
+            db.execute(f"ALTER TABLE inputs ADD COLUMN {name} TEXT")
     try:
         with db:
             yield db
@@ -73,7 +77,10 @@ def _task_failed(error: str) -> dict[str, Any]:
 def _task_receipt(row: Mapping[str, Any]) -> dict[str, Any]:
     admitted = row["state"] == "admitted"
     return {"ok": admitted, "admitted": admitted, "pending": True, "completed": False, "inputId": row["input_id"],
-            "turnId": row["turn_id"], "model": row["model"], "nativeSessionId": row["session_id"],
+            "turnId": row["turn_id"], "model": row["effective_model"],
+            "selectedModel": row["selected_model"], "modelAtAdmission": row["model"],
+            "effectiveModel": ({"model": row["effective_model"], "provider": row["effective_provider"], "source": "native-post-api-request", "turnId": row["turn_id"]} if row["effective_model"] else None),
+            "nativeSessionId": row["session_id"],
             "sessionKey": row["session_key"], "state": row["state"],
             **({} if admitted else {"admissionUnknown": True, "pending": True, "nonRetryable": True,
                                    "error": "Native turn admission is not yet observed; query this input ID only"})}
@@ -87,12 +94,37 @@ def _task_existing(row: Mapping[str, Any], key: str, digest: str) -> dict[str, A
     return receipt
 
 
-def _task_session(row: Mapping[str, Any], entry: Any, settings: Mapping[str, Any]) -> dict[str, Any]:
+async def _session_effective_model(gateway: Any, session_id: str) -> dict[str, Any] | None:
+    """Read core's persisted last runtime, never interpret its selected override as execution.
+
+    This is session-scoped evidence, not evidence about an arbitrary older input/turn.
+    """
+    try:
+        db = getattr(gateway, "_session_db", None)
+        if db is None:
+            return None
+        row = await asyncio.wait_for(db.get_session(session_id), timeout=.3)
+        if not row:
+            return None
+        config = json.loads(row.get("model_config") or "{}")
+        runtime = config.get("gateway_runtime")
+        if not isinstance(runtime, dict) or not row.get("model"):
+            return None
+        return {"model": row["model"], "provider": runtime.get("provider"),
+                "fallbackActive": runtime.get("fallback_active") is True, "source": "gateway-runtime", "scope": "last-session-runtime"}
+    except Exception:
+        return None
+
+
+def _task_session(row: Mapping[str, Any], entry: Any, settings: Mapping[str, Any], effective: Any = None) -> dict[str, Any]:
     return {"id": row["session_key"], "harness": "hermes", "title": row["name"], "cwd": row["cwd"],
             "status": "running" if getattr(entry, "active_turn_token", None) else "idle",
             "lastActivity": str(getattr(entry, "updated_at", "")), "needsPermission": False,
-            "model": (getattr(entry, "model_override", None) or {}).get("model") or settings.get("model"),
+            "model": effective.get("model") if effective else None,
             "meta": {"transport": "hermes-gateway-task", "sessionKey": row["session_key"],
+                     "selectedModel": (getattr(entry, "model_override", None) or {}).get("model") or settings.get("model"),
+                     "selectedProvider": (getattr(entry, "model_override", None) or {}).get("provider"),
+                     "effectiveModel": effective,
                      **({"taskBinding": {"name": row["name"], "cwd": row["cwd"], "generation": row["generation"]}}
                         if "generation" in row.keys() and row["generation"] else {}),
                      "nativeSessionId": row["session_id"], "sessionId": row["session_id"],
@@ -146,6 +178,7 @@ async def handle_task_request(body: Mapping[str, Any], *, authorization: str | N
                 return _task_failed("Live stored home session unavailable")
             if op == "session" and body["session_key"] not in {key, entry.session_id}:
                 return _task_failed("Target is not the configured home session")
+            effective = await _session_effective_model(gateway, entry.session_id) if op != "send" else None
             db.execute("BEGIN IMMEDIATE")
             if op == "send":
                 prior = db.execute("SELECT * FROM inputs WHERE input_id=?", (ident,)).fetchone()
@@ -165,17 +198,17 @@ async def handle_task_request(body: Mapping[str, Any], *, authorization: str | N
                     return {"ok": True, "session": None}
                 if op == "bind":
                     if binding and binding["name"] == name and binding["cwd"] == cwd and binding["generation"]:
-                        return {"ok": True, "session": _task_session(binding, entry, settings)}
+                        return {"ok": True, "session": _task_session(binding, entry, settings, effective)}
                     if getattr(entry, "active_turn_token", None) or gateway._is_session_running(key):
                         return _task_failed("Home session has an active writer")
                     if db.execute("SELECT 1 FROM inputs WHERE session_key=? AND state IN ('reserved','scheduled')", (key,)).fetchone():
                         return _task_failed("Home session has an unconfirmed input; query only")
                     db.execute("INSERT OR REPLACE INTO binding VALUES (?,?,?,?,?)", (key, entry.session_id, name, cwd, uuid.uuid4().hex))
                     binding = db.execute("SELECT * FROM binding WHERE session_key=?", (key,)).fetchone()
-                return {"ok": True, "session": _task_session(binding, entry, settings)}
+                return {"ok": True, "session": _task_session(binding, entry, settings, effective)}
             if op in {"session", "home"}:
                 row = binding or {"session_key": key, "session_id": entry.session_id, "name": key, "cwd": settings.get("cwd") or str(Path.cwd())}
-                return {"ok": True, "session": _task_session(row, entry, settings)}
+                return {"ok": True, "session": _task_session(row, entry, settings, effective)}
             if not binding:
                 return _task_failed("Bind the task to the existing home session first")
             expected_binding = body.get("expected_binding")
@@ -188,7 +221,8 @@ async def handle_task_request(body: Mapping[str, Any], *, authorization: str | N
             if db.execute("SELECT 1 FROM inputs WHERE session_key=? AND state IN ('reserved','scheduled')", (key,)).fetchone():
                 return _task_failed("Home session has an unconfirmed input; query only")
             marker = f"[Agent Herder task {uuid.uuid4().hex}]"
-            db.execute("INSERT INTO inputs VALUES (?,?,?,?,?,?,'reserved',NULL,NULL)", (ident,key,entry.session_id,binding["cwd"],digest,marker))
+            selected = (getattr(entry, "model_override", None) or {}).get("model") or settings.get("model")
+            db.execute("INSERT INTO inputs (input_id,session_key,session_id,cwd,digest,marker,state,turn_id,model,selected_model) VALUES (?,?,?,?,?,?,'reserved',NULL,NULL,?)", (ident,key,entry.session_id,binding["cwd"],digest,marker,selected))
         # Native call must occur only AFTER the durable reservation commits.
         try:
             scheduled = _ctx.inject_message(f"{marker}\nРабочая папка задачи: {binding['cwd']}\n{message}", session_key=key)
@@ -226,6 +260,14 @@ def _on_task_pre_llm_call(*, session_id: str, turn_id: str, user_message: Any, m
         from tools.terminal_tool import register_task_env_overrides
         register_task_env_overrides(session_id, {"cwd": row["cwd"]})
         db.execute("UPDATE inputs SET state='admitted',turn_id=?,model=? WHERE input_id=?", (turn_id,model,row["input_id"]))
+
+
+def _on_task_post_api_request(*, session_id: str, turn_id: str, model: str, provider: str, **_: Any) -> None:
+    """Observe the effective successful provider call for exactly this admitted native turn."""
+    if _ctx is None or not session_id or not turn_id or not model:
+        return
+    with _task_db() as db:
+        db.execute("UPDATE inputs SET effective_model=?,effective_provider=? WHERE session_id=? AND turn_id=? AND state='admitted'", (model,provider,session_id,turn_id))
 
 
 def _receipt_id() -> str:
@@ -394,3 +436,4 @@ def register(ctx: Any) -> None:
     _ctx = ctx
     ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", _on_task_pre_llm_call)
+    ctx.register_hook("post_api_request", _on_task_post_api_request)

@@ -47,7 +47,7 @@ fence. Older input receipts совместимы; legacy binding без generati
 
 `inject_message=True` подтверждает scheduling, **не native admission и не конец
 LLM**. Registered `pre_llm_call` наблюдает exact marker и native SID из настоящего
-agent prologue, сохраняет actual turn ID/model и применяет поддерживаемый
+agent prologue, сохраняет actual turn ID и modelAtAdmission (модель до возможного fallback) и применяет поддерживаемый
 `register_task_env_overrides(SID,{cwd})` до выполнения business tools. В source
 проверен Hermes `agent/turn_context.py::_collect_pre_llm_call_context`.
 HTTP ждёт этот ACK не дольше 2 секунд. Receipt:
@@ -56,7 +56,8 @@ HTTP ждёт этот ACK не дольше 2 секунд. Receipt:
 {"ok":true,"admitted":true,"pending":true,"completed":false,
  "inputId":"caller-input-id","turnId":"actual-native-turn",
  "sessionKey":"agent:main:telegram:group:-1004360838692:9",
- "nativeSessionId":"actual-stored-SID","model":"actual-native-model",
+ "nativeSessionId":"actual-stored-SID","model":null,
+ "selectedModel":"glm-5.3-flash","modelAtAdmission":"glm-5.3-flash","effectiveModel":null,
  "state":"admitted"}
 ```
 
@@ -79,7 +80,7 @@ thread_id и exact SID; вторую тему/исполнителя bridge не
 ```
 
 Installer сохраняет source symlink `plugins/agent-resume/__init__.py`, manifest
-с `pre_gateway_dispatch` и `pre_llm_call`; явно указанная option включает
+с `pre_gateway_dispatch`, `pre_llm_call` и `post_api_request`; явно указанная option включает
 supported grant и merge только plugin settings, сохраняя остальные значения
 live config и canonical symlink. Без option grant не меняется. Restart/services
 и actual topic dialogue canary выполняет Root. Bridge по прежнему получает
@@ -87,7 +88,8 @@ live Gateway context при первом genuine incoming event.
 
 На read-only проверке 12.10.2026 stored home SID был
 `20260909_220106_70ff6a6b`, а **его** model_override — `glm-5.3-flash`/`zai`.
-Default config `MiniMax-M3` нельзя выдавать за actual модель этой lane.
+Выбранная override не доказывает actual execution: настоящий consumer подтвердил
+fallback `MiniMax-M3`/`minimax`. Ни default, ни override сами по себе не evidence.
 Live `~/.hermes/config.yaml` — отдельный файл, а не symlink на canonical
 hermes-config snapshot. При установке нельзя заменять его всем старым snapshot;
 installer применяет только согласованные plugin settings. Перед consumer canary
@@ -98,3 +100,25 @@ Focused checks: реальный `PluginContext.inject_message` и Gateway dispa
 slow LLM после fast native ACK, same-input/restart/query-only, конфликт payload,
 active/CLI refusal и scoped installer merge. Telegram/provider в fixtures
 изолированы; это source proof, не live Telegram acceptance.
+
+## Selected model и effective model
+
+`home/session/find/bind`: `meta.selectedModel/selectedProvider` — выбранная
+настройка; top-level `model` и `meta.effectiveModel` берутся из existing core
+sessions.model + model_config.gateway_runtime после native turn. Это явно
+`scope:last-session-runtime`, не evidence для произвольного старого input.
+Если authoritative runtime отсутствует, `model:null`; selected остаётся отдельно.
+Herder сравнивает explicit requested model с selected intent, не запускает
+смену провайдера из-за наблюдаемого fallback.
+
+`receipt/send`: native ACK сохраняет `modelAtAdmission`, но actual `model:null`
+до успешного provider response. Supported `post_api_request` передаёт effective
+agent.model/provider после fallback; exact session_id+turn_id обновляет durable
+`model/effectiveModel:{model,provider,source:"native-post-api-request",turnId}`.
+Последующие human turns и другой SID не могут переписать этот input. Повтор
+остаётся чтением receipt, transport не повторяется. Это observation, не признак
+завершения: `pending:true,completed:false` сохраняются после ответа провайдера.
+Legacy input без per-turn hook evidence сохраняет `modelAtAdmission`, actual
+неизвестен; latest session runtime не приписывается прежнему input задним числом.
+DB migration добавляет nullable columns без изменения admitted/unknown fences.
+Сырые provider payload/base_url/credentials не сохраняются и не выдаются.
