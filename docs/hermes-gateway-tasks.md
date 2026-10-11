@@ -20,7 +20,10 @@ plugins:
 Они сохраняют/читают имя задачи и canonical CWD рядом с **существующими**
 session_key и native SID. Новая CLI-сессия или Telegram topic не создаётся.
 `session` принимает `{op:"session",session_key}`, `home` — `{op:"home"}`.
-`send` принимает `{op:"send",session_key,input_id,message}`;
+`send` принимает `{op:"send",session_key,input_id,message,expected_binding}`;
+для нового input обязательна `expected_binding:{name,cwd,generation}` из
+конкретного bind/find/session receipt. `session` также допускает exact текущий
+native SID как read alias и возвращает canonical session key; чужой SID запрещён.
 `receipt` — `{op:"receipt",session_key,input_id}` и только читает квитанцию.
 Все операции ограничены exact configured home key. Иные поля отклоняются.
 
@@ -30,6 +33,17 @@ Input identity, hash сообщения, случайный native marker, SID �
 reservation/receipt; конфликт сохраняет admission flags оригинала. Привязка
 остаётся после перезапуска Herder и plugin. Смена native SID требует явной
 reconciliation, не запускает новую задачу автоматически.
+
+Named binding имеет persisted generation. Под тем же SQLite write transaction
+проверяются name + canonical CWD + generation, и только затем резервируется
+новый input. Cached A → bind B → send A и resolve A → bind B → send A возвращают
+definite `notSubmitted:true` без native call и без смены terminal CWD. Даже
+A → B → A не оживляет старую generation. Повтор уже существующего input читает
+исходную receipt до этой проверки: binding change не снимает unknown/admitted
+fence. Older input receipts совместимы; legacy binding без generation требует
+явного bind, generation не угадывается. Обычный follow-up без named context
+сначала получает свежую current binding и передаёт её явно; гонка после lookup
+также отказывает до injection.
 
 `inject_message=True` подтверждает scheduling, **не native admission и не конец
 LLM**. Registered `pre_llm_call` наблюдает exact marker и native SID из настоящего

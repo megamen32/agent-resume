@@ -55,7 +55,9 @@ def _task_db():
     os.close(fd)
     db = sqlite3.connect(path, timeout=2)
     db.row_factory = sqlite3.Row
-    db.execute("CREATE TABLE IF NOT EXISTS binding (session_key TEXT PRIMARY KEY, session_id TEXT, name TEXT, cwd TEXT)")
+    db.execute("CREATE TABLE IF NOT EXISTS binding (session_key TEXT PRIMARY KEY, session_id TEXT, name TEXT, cwd TEXT, generation TEXT)")
+    if "generation" not in {column[1] for column in db.execute("PRAGMA table_info(binding)")}:
+        db.execute("ALTER TABLE binding ADD COLUMN generation TEXT")
     db.execute("CREATE TABLE IF NOT EXISTS inputs (input_id TEXT PRIMARY KEY, session_key TEXT, session_id TEXT, cwd TEXT, digest TEXT, marker TEXT UNIQUE, state TEXT, turn_id TEXT, model TEXT)")
     try:
         with db:
@@ -91,6 +93,8 @@ def _task_session(row: Mapping[str, Any], entry: Any, settings: Mapping[str, Any
             "lastActivity": str(getattr(entry, "updated_at", "")), "needsPermission": False,
             "model": (getattr(entry, "model_override", None) or {}).get("model") or settings.get("model"),
             "meta": {"transport": "hermes-gateway-task", "sessionKey": row["session_key"],
+                     **({"taskBinding": {"name": row["name"], "cwd": row["cwd"], "generation": row["generation"]}}
+                        if "generation" in row.keys() and row["generation"] else {}),
                      "nativeSessionId": row["session_id"], "sessionId": row["session_id"],
                      "origin": entry.origin.to_dict() if hasattr(entry.origin, "to_dict") else {
                          "platform": entry.origin.platform.value, "chat_id": entry.origin.chat_id,
@@ -116,9 +120,12 @@ async def handle_task_request(body: Mapping[str, Any], *, authorization: str | N
         op = body.get("op")
         fields = {"home": {"op"}, "bind": {"op", "name", "cwd"}, "find": {"op", "name", "cwd"}, "session": {"op", "session_key"},
                   "send": {"op", "session_key", "input_id", "message"}, "receipt": {"op", "session_key", "input_id"}}
-        if op not in fields or set(body) != fields[op]:
+        allowed = fields.get(op, set())
+        if op == "send" and "expected_binding" in body:
+            allowed = allowed | {"expected_binding"}
+        if op not in fields or set(body) != allowed:
             return _task_failed("Invalid task operation fields")
-        if op in {"send", "receipt", "session"} and body["session_key"] != key:
+        if op in {"send", "receipt"} and body["session_key"] != key:
             return _task_failed("Target is not the configured home session")
         with _task_db() as db:
             if op == "receipt":
@@ -137,6 +144,8 @@ async def handle_task_request(body: Mapping[str, Any], *, authorization: str | N
             entry = await gateway.async_session_store.lookup_by_session_key(key)
             if entry is None or entry.origin is None or not gateway._plugin_injection_accepting():
                 return _task_failed("Live stored home session unavailable")
+            if op == "session" and body["session_key"] not in {key, entry.session_id}:
+                return _task_failed("Target is not the configured home session")
             db.execute("BEGIN IMMEDIATE")
             if op == "send":
                 prior = db.execute("SELECT * FROM inputs WHERE input_id=?", (ident,)).fetchone()
@@ -155,11 +164,13 @@ async def handle_task_request(body: Mapping[str, Any], *, authorization: str | N
                 if op == "find" and (not binding or binding["name"] != name or binding["cwd"] != cwd):
                     return {"ok": True, "session": None}
                 if op == "bind":
+                    if binding and binding["name"] == name and binding["cwd"] == cwd and binding["generation"]:
+                        return {"ok": True, "session": _task_session(binding, entry, settings)}
                     if getattr(entry, "active_turn_token", None) or gateway._is_session_running(key):
                         return _task_failed("Home session has an active writer")
                     if db.execute("SELECT 1 FROM inputs WHERE session_key=? AND state IN ('reserved','scheduled')", (key,)).fetchone():
                         return _task_failed("Home session has an unconfirmed input; query only")
-                    db.execute("INSERT OR REPLACE INTO binding VALUES (?,?,?,?)", (key, entry.session_id, name, cwd))
+                    db.execute("INSERT OR REPLACE INTO binding VALUES (?,?,?,?,?)", (key, entry.session_id, name, cwd, uuid.uuid4().hex))
                     binding = db.execute("SELECT * FROM binding WHERE session_key=?", (key,)).fetchone()
                 return {"ok": True, "session": _task_session(binding, entry, settings)}
             if op in {"session", "home"}:
@@ -167,6 +178,11 @@ async def handle_task_request(body: Mapping[str, Any], *, authorization: str | N
                 return {"ok": True, "session": _task_session(row, entry, settings)}
             if not binding:
                 return _task_failed("Bind the task to the existing home session first")
+            expected_binding = body.get("expected_binding")
+            if (not isinstance(expected_binding, Mapping) or set(expected_binding) != {"name", "cwd", "generation"}
+                or not binding["generation"]
+                or dict(expected_binding) != {"name": binding["name"], "cwd": binding["cwd"], "generation": binding["generation"]}):
+                return _task_failed("Named task binding changed before delivery; resolve the intended task explicitly")
             if getattr(entry, "active_turn_token", None) or gateway._is_session_running(key):
                 return _task_failed("Home session has an active writer")
             if db.execute("SELECT 1 FROM inputs WHERE session_key=? AND state IN ('reserved','scheduled')", (key,)).fetchone():

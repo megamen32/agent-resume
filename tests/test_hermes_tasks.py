@@ -48,7 +48,9 @@ def test_native_ack_is_fast_and_duplicate_survives_restart(tmp_path):
         assert bound["session"]["id"] == KEY
         assert bound["session"]["meta"]["nativeSessionId"] == SID
         assert bound["session"]["model"] == "glm-5.3-flash"
-        body = dict(op="send", session_key=KEY, input_id="input-1", message="Исправь только выбранную причину")
+        assert (await request(mod,gateway,op="session",session_key=SID))["session"]["id"]==KEY
+        assert (await request(mod,gateway,op="session",session_key="foreign-SID"))["notSubmitted"]
+        body = dict(op="send", session_key=KEY, input_id="input-1", message="Исправь только выбранную причину", expected_binding=bound["session"]["meta"]["taskBinding"])
         receipt = await asyncio.wait_for(request(mod, gateway, **body), 1)
         assert receipt["admitted"] is True and receipt["completed"] is False
         assert receipt["turnId"] == "native-turn"
@@ -70,8 +72,8 @@ def test_scheduling_true_is_unknown_and_never_replayed(tmp_path):
     ctx.inject_message = lambda content, **kw: calls.append(content) or True
     mod._TASK_ACK_SECONDS = .01
     async def run():
-        await request(mod, gateway, op="bind", name="repair", cwd=str(tmp_path))
-        body = dict(op="send", session_key=KEY, input_id="lost", message="work")
+        bound = await request(mod, gateway, op="bind", name="repair", cwd=str(tmp_path))
+        body = dict(op="send", session_key=KEY, input_id="lost", message="work", expected_binding=bound["session"]["meta"]["taskBinding"])
         receipt = await request(mod, gateway, **body)
         assert receipt["ok"] is False and receipt["admissionUnknown"] and receipt["nonRetryable"]
         assert not receipt["admitted"] and receipt["completed"] is False
@@ -91,8 +93,8 @@ def test_auth_target_cli_and_active_writer_fail_before_injection(tmp_path):
     async def run():
         denied = await mod.handle_task_request({"op": "session"}, authorization="wrong", gateway=gateway)
         assert denied["notSubmitted"] and denied["error"] == "unauthorized"
-        await request(mod, gateway, op="bind", name="repair", cwd=str(tmp_path))
-        body = dict(op="send", session_key=KEY, input_id="i", message="work")
+        bound = await request(mod, gateway, op="bind", name="repair", cwd=str(tmp_path))
+        body = dict(op="send", session_key=KEY, input_id="i", message="work", expected_binding=bound["session"]["meta"]["taskBinding"])
         assert (await request(mod, gateway, **{**body, "session_key": "foreign"}))["notSubmitted"]
         entry.active_turn_token = "busy"
         assert (await request(mod, gateway, **body))["notSubmitted"]
@@ -130,8 +132,8 @@ def test_supported_context_and_gateway_dispatch_preserve_topic_and_native_id(tmp
         ctx.plugin_id='agent-resume'; ctx._gateway_injection_allowed=lambda: True
         ctx._manager.has_tui_message_injector=False;ctx._manager.has_gateway_message_injector=True;ctx._manager.inject_gateway_message=schedule
         ctx.inject_message=PluginContext.inject_message.__get__(ctx)
-        await request(mod,gateway,op='bind',name='repair',cwd=str(tmp_path))
-        receipt=await asyncio.wait_for(request(mod,gateway,op='send',session_key=KEY,input_id='supported',message='Ремонт'),1)
+        bound=await request(mod,gateway,op='bind',name='repair',cwd=str(tmp_path))
+        receipt=await asyncio.wait_for(request(mod,gateway,op='send',session_key=KEY,input_id='supported',message='Ремонт',expected_binding=bound['session']['meta']['taskBinding']),1)
         assert receipt['admitted'] and not tasks[0].done()
         event=events[0]
         assert event.source.thread_id == '9' and event.metadata['gateway_session_strict']
@@ -163,8 +165,8 @@ def test_existing_authenticated_http_ingress_ack_does_not_wait_for_llm(tmp_path)
         try:
             async with aiohttp.ClientSession(headers={'Authorization':'Bearer test-token'}) as client:
                 async with client.post(url,json={'op':'bind','name':'http-repair','cwd':str(tmp_path)}) as r:
-                    assert (await r.json())['session']['id']==KEY
-                body={'op':'send','session_key':KEY,'input_id':'http-one','message':'Работа'}
+                    bound=await r.json();assert bound['session']['id']==KEY
+                body={'op':'send','session_key':KEY,'input_id':'http-one','message':'Работа','expected_binding':bound['session']['meta']['taskBinding']}
                 async with asyncio.timeout(1):
                     async with client.post(url,json=body) as r: receipt=await r.json()
                 assert receipt['admitted'] and receipt['turnId']=='http-native' and not receipt['completed']
@@ -178,3 +180,35 @@ def test_existing_authenticated_http_ingress_ack_does_not_wait_for_llm(tmp_path)
             await asyncio.gather(*turns,return_exceptions=True)
             await bridge.runner.cleanup();mod._bridge=None
     with patch.dict(os.environ,{'AGENT_RESUME_HERMES_TOKEN':'test-token','AGENT_RESUME_HERMES_PORT':str(port)}):asyncio.run(run())
+
+
+def test_atomic_binding_generation_fences_a_b_cached_a_and_aba(tmp_path):
+    mod=load_module();gateway,ctx,entry=setup(mod,tmp_path)
+    a=tmp_path/'A';b=tmp_path/'B';a.mkdir();b.mkdir();calls=[]
+    def inject(content,**kw):
+        calls.append(content)
+        mod._on_task_pre_llm_call(session_id=SID,turn_id=str(len(calls)),user_message=content,model='glm-5.3-flash')
+        return True
+    ctx.inject_message=inject
+    async def run():
+        bound_a=(await request(mod,gateway,op='bind',name='A',cwd=str(a)))['session']['meta']['taskBinding']
+        body={'op':'send','session_key':KEY,'input_id':'A-first','message':'A','expected_binding':bound_a}
+        assert (await request(mod,gateway,**body))['admitted']
+        bound_b=(await request(mod,gateway,op='bind',name='B',cwd=str(b)))['session']['meta']['taskBinding']
+        assert (await request(mod,gateway,**{**body,'input_id':'B-first','message':'B','expected_binding':bound_b}))['admitted']
+        from tools.terminal_tool import get_session_cwd
+        assert get_session_cwd(SID)==str(b)
+        stale=await request(mod,gateway,**{**body,'input_id':'A-distinct'})
+        assert stale['notSubmitted'] and not stale.get('admissionUnknown')
+        assert get_session_cwd(SID)==str(b) and len(calls)==2
+        assert (await request(mod,gateway,op='receipt',session_key=KEY,input_id='A-distinct'))['state']=='not_found'
+        current=(await request(mod,gateway,op='session',session_key=KEY))['session']['meta']['taskBinding']
+        assert current==bound_b
+        assert (await request(mod,gateway,**{**body,'input_id':'B-follow','expected_binding':current}))['admitted']
+        assert len(calls)==3 and get_session_cwd(SID)==str(b)
+        new_a=(await request(mod,gateway,op='bind',name='A',cwd=str(a)))['session']['meta']['taskBinding']
+        assert new_a['generation']!=bound_a['generation']
+        assert (await request(mod,gateway,**{**body,'input_id':'ABA-stale'}))['notSubmitted']
+        # Original admission is still query-only/replay-safe after binding changes.
+        assert (await request(mod,gateway,**body))['admitted'] and len(calls)==3
+    with patch.dict(os.environ,{'AGENT_RESUME_HERMES_TOKEN':'test-token'}):asyncio.run(run())
