@@ -1,0 +1,101 @@
+{
+  "source_commit": "2c2950ce6a8f0fdab0932db453807a07f5b07796",
+  "plugin_version": "0.1.10",
+  "supported_seams": [
+    "PluginContext.register_platform_handler",
+    "BasePlatformAdapter.gateway_runner",
+    "PluginContext.spawn_task"
+  ],
+  "tests": {
+    "focused_scenarios": 5,
+    "body_seconds": 3.438,
+    "body_max_seconds": 15,
+    "result": {
+      "case_sha256": "ed38d99a8d5bf67f91016c47a54fac5d3eeb571690ed36d90b9a2e69f5a11ff5",
+      "helper_exit": 0,
+      "receipt": "/home/roomhacker/agents-projects/.worktrees/herder-incident-human-loop/.tmp/agent-resume-startup-check/attempt-8fe0a6ffa2af275c4ecdd305362cdd5d.json",
+      "receipt_sha256": "d5888cee1e2615786e6826dee59b8ac94e7ecdd4e01f0bd9a24da4118bc0c57f",
+      "cleanup_enforced_by_existing_helper": true,
+      "generation": {
+        "unit": "run-u181248.scope",
+        "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/run-u181248.scope",
+        "invocation": "d062d05d98db412bb9648ca3f42497d9",
+        "inode": 65741858,
+        "pid": 1492170,
+        "start": "90184009"
+      },
+      "peak_bytes": 83320832,
+      "swap_current": 0,
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "lease": "/home/roomhacker/agents-projects/.worktrees/herder-incident-human-loop/.tmp/agent-resume-startup-check/temp/bounded-97rhronv",
+      "same_generation_cleanup": true,
+      "native_result_sha256": "add0c64f7f0e379e385a3a5b587436b87789749dc39e9b16ae45663ac0b1d0ec",
+      "payload_log_sha256": "8b7367bb2823b2ac28c4c7327f7e644343ec9c6340240a491738f36886e87bcb",
+      "status": "completed",
+      "observed_unix": 1791769270
+    },
+    "source_pins": {
+      "/home/roomhacker/agents-projects/.worktrees/herder-incident-human-loop/.tmp/agent-resume-startup-check/checks.py": "0a76eaa202700820e2833dc1080594f0305d7ceaba5784ea92b4b6761b444b08",
+      "/home/roomhacker/agents-projects/agent-resume/hermes_gateway.py": "5e0e12c157bdd2f068edd78e15fb7f92183144fb3b80d2fc523d5bf5f07436e9",
+      "/home/roomhacker/agents-projects/agent-resume/scripts/install-hermes-plugin.py": "9f2c94e2b29a914abd95058bb952abcd524649e5247331a338dea4346350f374",
+      "/home/roomhacker/agents-projects/agent-resume/tests/test_hermes_startup.py": "c8fd5bd8448321d09fa451c02a731c775e8ee155935aa165257de743fd574e22",
+      "/home/roomhacker/agents-projects/agent-resume/tests/test_hermes_gateway.py": "3523520f91c9fba7da0ff21b3d9f7cc1b9cbf02ec514565e99abacea5c4d9329",
+      "/home/roomhacker/agents-projects/agent-resume/tests/test_hermes_tasks.py": "d6645d4b30eca49625c05d0b899559f9324819576f5f853de40f066e90057163",
+      "/home/roomhacker/.hermes/hermes-agent/hermes_bootstrap.py": "f242036b2d35b92283b9a7e97c7059e537607fc4b02026f657a6d00cb4683f69",
+      "/home/roomhacker/.hermes/hermes-agent/hermes_cli/plugins.py": "f5a1c27a22025984bbf956b58154ce23914592307bd945d7a1c0167cc443d771",
+      "/home/roomhacker/.hermes/hermes-agent/hermes_cli/plugins_ledger.py": "07f1834f623e132e80a38fa1caa4a9ed421e8caa91ee2bc092d0a8b306baa1b6",
+      "/home/roomhacker/.hermes/hermes-agent/gateway/platforms/base.py": "c09968def5166c4ab9f6f08005e65581f54193f5556892f7c49d0a7321f45463",
+      "/home/roomhacker/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11": "572cfa2a8597e2f431c785613539b1d219fa99eecf5ffb5765731a2ebc3e692a"
+    },
+    "same_generation_cleanup": true,
+    "provider_or_business_calls": 0
+  },
+  "live": {
+    "ready_without_telegram_event": true,
+    "old_pid": 1121670,
+    "new_pid": 1548737,
+    "http_statuses": [
+      200,
+      200
+    ],
+    "binding_and_cwd_generation_unchanged": true,
+    "all_routing_rows_unchanged": 115,
+    "input_ledger_unchanged": 2,
+    "config_env_notice_unchanged": true,
+    "new_business_inputs": 0,
+    "guarded_native_lifecycle_count": 1,
+    "protected_token_source": "existing supported EnvironmentFile ~/.config/agent-resume/hermes.env"
+  },
+  "home_identity": {
+    "session_key": "agent:main:telegram:group:-1004360838692:9",
+    "native_session_id": "20260909_220106_70ff6a6b",
+    "cwd": "/home/roomhacker/ServersAdministartion",
+    "binding_generation": "586362bad09f4bc19e93dc4032b80ffc"
+  },
+  "existing_receipt_query": {
+    "input_id": "root-hermes-home-direct-readonly-cwd-20261012",
+    "admitted": true,
+    "completed": false
+  },
+  "prior_sigusr1": {
+    "at": "2026-10-12T04:02:20MSK",
+    "old_pid": 667776,
+    "exit": 75,
+    "actor_unattributed": true,
+    "current_window": "Root confirmed sole Hermes lifecycle owner; fresh actor1121670/active0/restartfalse before action"
+  },
+  "live_readonly_pre_auth_errors_retained": [
+    "first assumed legacy .env token source: KeyError before HTTP",
+    "then expected0600 but existing approved shared EnvironmentFile is0640; no chmod; corrected read-only guard before HTTP"
+  ],
+  "preserved_notice_no_reinstall": true,
+  "hermes_core_unchanged": true,
+  "previous_three_config_scenarios_not_repeated": true
+}
