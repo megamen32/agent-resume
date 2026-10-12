@@ -52,7 +52,7 @@ def _task_db():
     home = Path(_ctx._manager.home_path) / "state" / "agent-resume"
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = home / "gateway-tasks.sqlite3"
-    # Create owner-only before SQLite opens it. No prompts or credentials are stored.
+    # Existing owner-only receipt ledger; bounded active context is transient. No credentials.
     fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
     os.close(fd)
     db = sqlite3.connect(path, timeout=2)
@@ -62,7 +62,7 @@ def _task_db():
         db.execute("ALTER TABLE binding ADD COLUMN generation TEXT")
     db.execute("CREATE TABLE IF NOT EXISTS inputs (input_id TEXT PRIMARY KEY, session_key TEXT, session_id TEXT, cwd TEXT, digest TEXT, marker TEXT UNIQUE, state TEXT, turn_id TEXT, model TEXT)")
     columns = {column[1] for column in db.execute("PRAGMA table_info(inputs)")}
-    for name in ("selected_model", "effective_model", "effective_provider"):
+    for name in ("selected_model", "effective_model", "effective_provider", "context_text", "context_token", "context_expires"):
         if name not in columns:
             db.execute(f"ALTER TABLE inputs ADD COLUMN {name} TEXT")
     try:
@@ -77,13 +77,17 @@ def _task_failed(error: str) -> dict[str, Any]:
 
 
 def _task_receipt(row: Mapping[str, Any]) -> dict[str, Any]:
-    admitted = row["state"] == "admitted"
+    if row['state'] == 'rejected':
+        return {'ok': False, 'notSubmitted': True, 'nonRetryable': True, 'inputId': row['input_id'],
+                'error': 'Active native turn ended or refused guidance; no future input was retained'}
+    admitted = row["state"] in {"admitted","active_pending","active_offered"}
     return {"ok": admitted, "admitted": admitted, "pending": True, "completed": False, "inputId": row["input_id"],
             "turnId": row["turn_id"], "model": row["effective_model"],
             "selectedModel": row["selected_model"], "modelAtAdmission": row["model"],
             "effectiveModel": ({"model": row["effective_model"], "provider": row["effective_provider"], "source": "native-post-api-request", "turnId": row["turn_id"]} if row["effective_model"] else None),
             "nativeSessionId": row["session_id"],
             "sessionKey": row["session_key"], "state": row["state"],
+            **({"admissionKind":"current_turn_context"} if row["state"] in {"active_pending","active_offered"} else {}),
             **({} if admitted else {"admissionUnknown": True, "pending": True, "nonRetryable": True,
                                    "error": "Native turn admission is not yet observed; query this input ID only"})}
 
@@ -118,7 +122,63 @@ async def _session_effective_model(gateway: Any, session_id: str) -> dict[str, A
         return None
 
 
-def _task_session(row: Mapping[str, Any], entry: Any, settings: Mapping[str, Any], effective: Any = None) -> dict[str, Any]:
+def _task_live_agent(gateway: Any, key: str, entry: Any) -> Any:
+    """Read the installed runner's exact existing slot; never create a session/agent."""
+    peek = getattr(gateway, '_peek_session_state', None)
+    state = peek(key) if callable(peek) else None
+    agent = getattr(getattr(state, 'turn', None), 'agent', None)
+    return agent if agent is not None and getattr(agent, 'session_id', None) == entry.session_id else None
+
+
+def _task_active_steer(gateway: Any, key: str, entry: Any, binding: Any, body: Mapping[str, Any], ident: str, message: str, digest: str) -> dict[str, Any]:
+    """No await between live identity/reservation and public redirect. Its model lock is final authority.
+
+    Tool phase reserves exact-turn context for the supported tool-result hook, never a future input.
+    """
+    expected = body.get('expected_binding')
+    if (not binding or not isinstance(expected, Mapping)
+        or dict(expected) != {'name': binding['name'], 'cwd': binding['cwd'], 'generation': binding['generation']}):
+        return _task_failed('Named task binding changed before guidance')
+    agent = _task_live_agent(gateway, key, entry)
+    token = getattr(entry, 'active_turn_token', None)
+    native_turn = getattr(agent, '_current_turn_id', None)
+    model_event = getattr(agent, '_model_request_active', None)
+    if (not agent or not token or token != body.get('expected_turn_token')
+        or native_turn != body.get('expected_native_turn_id') or not native_turn
+        or entry.session_id != body.get('expected_native_session_id')
+        or (not getattr(agent, '_executing_tools', False) and (not model_event or not model_event.is_set()))
+        or getattr(agent, '_interrupt_requested', False) or not callable(getattr(agent, 'redirect', None))):
+        return _task_failed('skipped_inactive: exact native model request is not accepting guidance')
+    tool_phase = getattr(agent,'_executing_tools',False) is True
+    with _task_db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        prior = db.execute('SELECT * FROM inputs WHERE input_id=?', (ident,)).fetchone()
+        if prior: return _task_existing(prior, key, digest)
+        db.execute("INSERT INTO inputs (input_id,session_key,session_id,cwd,digest,marker,state,turn_id,model) VALUES (?,?,?,?,?,?,'reserved',?,NULL)",
+                   (ident,key,entry.session_id,binding['cwd'],digest,f'[Agent Herder steer {uuid.uuid4().hex}]',native_turn))
+        if tool_phase:
+            # Same existing receipt ledger, exact native owner/turn, finite context budget.
+            db.execute("UPDATE inputs SET state='rejected',context_text=NULL WHERE state='active_pending' AND CAST(context_expires AS REAL)<=?",(time.time(),))
+            if db.execute("SELECT count(*) FROM inputs WHERE state='active_pending' AND session_key=?",(key,)).fetchone()[0]>=64:
+                db.execute("UPDATE inputs SET state='rejected' WHERE input_id=?",(ident,))
+            else:
+                db.execute("UPDATE inputs SET state='active_pending',context_text=?,context_token=?,context_expires=? WHERE input_id=?",(message,token,time.time()+300,ident))
+    if tool_phase:
+        with _task_db() as db:return _task_receipt(db.execute('SELECT * FROM inputs WHERE input_id=?',(ident,)).fetchone())
+    # Native atomic redirect rejects a completed model request; no inject_message fallback.
+    try:
+        accepted = agent.redirect(message) is True
+    except Exception:
+        with _task_db() as db: return _task_receipt(db.execute('SELECT * FROM inputs WHERE input_id=?', (ident,)).fetchone())
+    try:
+        with _task_db() as db:
+            db.execute('UPDATE inputs SET state=? WHERE input_id=?', ('admitted' if accepted else 'rejected',ident))
+            return _task_receipt(db.execute('SELECT * FROM inputs WHERE input_id=?', (ident,)).fetchone())
+    except Exception:
+        return {'ok':False,'inputId':ident,'admissionUnknown':True,'nonRetryable':True,'error':'Native guidance receipt unavailable; query only'}
+
+
+def _task_session(row: Mapping[str, Any], entry: Any, settings: Mapping[str, Any], effective: Any = None, gateway: Any = None) -> dict[str, Any]:
     return {"id": row["session_key"], "harness": "hermes", "title": row["name"], "cwd": row["cwd"],
             "status": "running" if getattr(entry, "active_turn_token", None) else "idle",
             "lastActivity": str(getattr(entry, "updated_at", "")), "needsPermission": False,
@@ -130,6 +190,8 @@ def _task_session(row: Mapping[str, Any], entry: Any, settings: Mapping[str, Any
                      **({"taskBinding": {"name": row["name"], "cwd": row["cwd"], "generation": row["generation"]}}
                         if "generation" in row.keys() and row["generation"] else {}),
                      "nativeSessionId": row["session_id"], "sessionId": row["session_id"],
+                     "activeTurnToken": getattr(entry,"active_turn_token",None),
+                     "nativeActiveTurnId": getattr(_task_live_agent(gateway,row["session_key"],entry),"_current_turn_id",None),
                      "origin": entry.origin.to_dict() if hasattr(entry.origin, "to_dict") else {
                          "platform": entry.origin.platform.value, "chat_id": entry.origin.chat_id,
                          "thread_id": entry.origin.thread_id}, "cwdSource": "task-terminal-override-on-admission"}}
@@ -153,19 +215,20 @@ async def handle_task_request(body: Mapping[str, Any], *, authorization: str | N
             return _task_failed("Explicit gateway task session key is not configured")
         op = body.get("op")
         fields = {"home": {"op"}, "bind": {"op", "name", "cwd"}, "find": {"op", "name", "cwd"}, "session": {"op", "session_key"},
+                  "steer": {"op","session_key","input_id","message","expected_binding","expected_turn_token","expected_native_turn_id","expected_native_session_id"},
                   "send": {"op", "session_key", "input_id", "message"}, "receipt": {"op", "session_key", "input_id"}}
         allowed = fields.get(op, set())
         if op == "send" and "expected_binding" in body:
             allowed = allowed | {"expected_binding"}
         if op not in fields or set(body) != allowed:
             return _task_failed("Invalid task operation fields")
-        if op in {"send", "receipt"} and body["session_key"] != key:
+        if op in {"send", "steer", "receipt"} and body["session_key"] != key:
             return _task_failed("Target is not the configured home session")
         with _task_db() as db:
             if op == "receipt":
                 row = db.execute("SELECT * FROM inputs WHERE input_id=? AND session_key=?", (body["input_id"], key)).fetchone()
                 return _task_receipt(row) if row else {"ok": True, "state": "not_found"}
-            if op == "send":
+            if op in {"send", "steer"}:
                 ident, message = body["input_id"], body["message"]
                 if not isinstance(ident, str) or not 1 <= len(ident) <= 256 or any(ord(c)<32 for c in ident):
                     return _task_failed("A bounded stable input ID is required")
@@ -180,9 +243,9 @@ async def handle_task_request(body: Mapping[str, Any], *, authorization: str | N
                 return _task_failed("Live stored home session unavailable")
             if op == "session" and body["session_key"] not in {key, entry.session_id}:
                 return _task_failed("Target is not the configured home session")
-            effective = await _session_effective_model(gateway, entry.session_id) if op != "send" else None
+            effective = await _session_effective_model(gateway, entry.session_id) if op not in {"send","steer"} else None
             db.execute("BEGIN IMMEDIATE")
-            if op == "send":
+            if op in {"send", "steer"}:
                 prior = db.execute("SELECT * FROM inputs WHERE input_id=?", (ident,)).fetchone()
                 if prior:
                     return _task_existing(prior, key, digest)
@@ -200,17 +263,21 @@ async def handle_task_request(body: Mapping[str, Any], *, authorization: str | N
                     return {"ok": True, "session": None}
                 if op == "bind":
                     if binding and binding["name"] == name and binding["cwd"] == cwd and binding["generation"]:
-                        return {"ok": True, "session": _task_session(binding, entry, settings, effective)}
+                        return {"ok": True, "session": _task_session(binding, entry, settings, effective, gateway)}
                     if getattr(entry, "active_turn_token", None) or gateway._is_session_running(key):
                         return _task_failed("Home session has an active writer")
                     if db.execute("SELECT 1 FROM inputs WHERE session_key=? AND state IN ('reserved','scheduled')", (key,)).fetchone():
                         return _task_failed("Home session has an unconfirmed input; query only")
                     db.execute("INSERT OR REPLACE INTO binding VALUES (?,?,?,?,?)", (key, entry.session_id, name, cwd, uuid.uuid4().hex))
                     binding = db.execute("SELECT * FROM binding WHERE session_key=?", (key,)).fetchone()
-                return {"ok": True, "session": _task_session(binding, entry, settings, effective)}
+                return {"ok": True, "session": _task_session(binding, entry, settings, effective, gateway)}
             if op in {"session", "home"}:
                 row = binding or {"session_key": key, "session_id": entry.session_id, "name": key, "cwd": settings.get("cwd") or str(Path.cwd())}
-                return {"ok": True, "session": _task_session(row, entry, settings, effective)}
+                return {"ok": True, "session": _task_session(row, entry, settings, effective, gateway)}
+            if op == 'steer':
+                # Drop this read transaction before the strict reservation transaction.
+                db.commit()
+                return _task_active_steer(gateway,key,entry,binding,body,ident,message,digest)
             if not binding:
                 return _task_failed("Bind the task to the existing home session first")
             expected_binding = body.get("expected_binding")
@@ -262,6 +329,56 @@ def _on_task_pre_llm_call(*, session_id: str, turn_id: str, user_message: Any, m
         from tools.terminal_tool import register_task_env_overrides
         register_task_env_overrides(session_id, {"cwd": row["cwd"]})
         db.execute("UPDATE inputs SET state='admitted',turn_id=?,model=? WHERE input_id=?", (turn_id,model,row["input_id"]))
+
+
+def _task_coordination_held(key:str,session_id:str,cwd:str) -> bool:
+    """Existing Herder Stop read; unavailable/unknown is a refusal, never a guessed release."""
+    from urllib.parse import urlsplit,urlencode
+    endpoint=os.environ.get('AGENT_HERDER_URL','http://127.0.0.1:18787')
+    target=urlsplit(endpoint)
+    if target.scheme!='http' or target.hostname not in {'127.0.0.1','localhost','::1'}:return True
+    try:
+        for ident in {key,session_id}:
+            with urlopen(endpoint.rstrip('/')+'/api/coordination/context?'+urlencode({'harness':'hermes','sessionId':ident,'cwd':cwd,'consume':'0'}),timeout=1) as response:
+                if json.loads(response.read()).get('humanStopHeld') is not False:return True
+        return False
+    except Exception:return True
+
+
+def _on_task_transform_tool_result(*,session_id:str,turn_id:str,result:Any,tool_call_id:str='',**_:Any) -> str | None:
+    """Official mutable tool-result hook, already inside this exact native turn.
+
+    Never append via observer-only pre_api_request or change a core message buffer.
+    """
+    if not isinstance(result,str) or not session_id or not turn_id or not tool_call_id or _bridge is None:
+        return None
+    gateway=getattr(_bridge,'gateway',None)
+    key=_task_settings().get('session_key')
+    peek=getattr(gateway,'_peek_session_state',None)
+    state=peek(key) if callable(peek) else None
+    agent=getattr(getattr(state,'turn',None),'agent',None)
+    token=getattr(getattr(getattr(state,'turn',None),'event',None),'_gateway_active_turn_token',None)
+    if (not agent or agent.session_id!=session_id or getattr(agent,'_current_turn_id',None)!=turn_id
+        or not token or getattr(agent,'_interrupt_requested',False)
+        or getattr(getattr(state,'persistent',None),'approvals',None)):
+        return None
+    with _task_db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        db.execute("UPDATE inputs SET state='rejected',context_text=NULL WHERE state='active_pending' AND (CAST(context_expires AS REAL)<=? OR (session_key=? AND turn_id!=?))",(time.time(),key,turn_id))
+        rows=db.execute("SELECT * FROM inputs WHERE session_id=? AND session_key=? AND turn_id=? AND context_token=? AND state='active_pending' ORDER BY rowid",(session_id,key,turn_id,token)).fetchall()
+        if not rows:return None
+        if _task_coordination_held(key,session_id,rows[0]['cwd']):
+            for row in rows:db.execute("UPDATE inputs SET state='rejected',context_text=NULL WHERE input_id=?",(row['input_id'],))
+            return None
+        # Recheck the live slot after waiting for the existing durable ledger lock.
+        current=peek(key)
+        if (current is not state or current.turn.agent is not agent
+            or getattr(agent,'_current_turn_id',None)!=turn_id or getattr(agent,'_interrupt_requested',False)
+            or getattr(current.turn.event,'_gateway_active_turn_token',None)!=token
+            or getattr(getattr(current,'persistent',None),'approvals',None)):return None
+        text='\n'.join(f"- id={row['input_id']} :: {row['context_text']}" for row in rows)
+        for row in rows:db.execute("UPDATE inputs SET state='active_offered',context_text=NULL WHERE input_id=?",(row['input_id'],))
+    return result+'\n\n<agent-herder-active-context>\n'+text+'\n</agent-herder-active-context>'
 
 
 def _on_task_post_api_request(*, session_id: str, turn_id: str, model: str, provider: str, **_: Any) -> None:
@@ -369,6 +486,7 @@ async def handle_local_request(body: Mapping[str, Any], *, authorization: str | 
 class Bridge:
     runner: Any
     site: Any
+    gateway: Any = None
 
 
 async def start_bridge(gateway: Any) -> Bridge | None:
@@ -414,7 +532,7 @@ async def _start_bridge_locked(gateway: Any) -> Bridge | None:
         await runner.setup()
         site = web.TCPSite(runner, host=os.environ.get(_HOST_ENV, "127.0.0.1"), port=port)
         await site.start()
-        _bridge = Bridge(runner=runner, site=site)
+        _bridge = Bridge(runner=runner, site=site, gateway=gateway)
         return _bridge
     except asyncio.CancelledError:
         if runner is not None:
@@ -483,6 +601,7 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", _on_task_pre_llm_call)
     ctx.register_hook("post_api_request", _on_task_post_api_request)
+    ctx.register_hook("transform_tool_result", _on_task_transform_tool_result)
     key = _task_settings().get("session_key")
     if isinstance(key, str):
         parts = key.split(":")

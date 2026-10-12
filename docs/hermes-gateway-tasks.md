@@ -141,3 +141,26 @@ durable exact-turn receipt, fallback/legacy row/restart/no replay и scoped inst
 отдельно2/2 PASS существующим системным Python. Herder build +8/8 Vitest PASS.
 Bounded windows54.714s включая setup, RAM max2GiB/swap0/OOM0. Не заявляется live
 acceptance нового metadata hook до Root reload после завершения official updater.
+
+
+## Active coordination without task activation
+
+The existing authenticated task ingress adds `op=steer`, with exact current
+binding, native SID, native turn ID and Gateway active-turn token. It reserves
+one input ID in the existing inputs ledger before native mutation. Model phase
+uses the installed public Agent.redirect final model lock; a late false refusal
+never falls back to inject_message/queue/start. Tool phase holds bounded context
+in that same existing row until the official transform_tool_result hook for
+exactly this live agent/token/turn. The original tool result is preserved, and
+this context cannot target a new native turn. Pending context TTL is five minutes,
+64 records per configured home; expired/mismatched records lose their text.
+The existing Bridge retains the exact Gateway reference provided by its supported
+startup callback; no new controller, registry or native core patch is introduced.
+
+Installer manifest 0.1.11 declares transform_tool_result in addition to existing
+hooks. Existing grants/model/binding configuration are preserved. Receipts are
+pending technical admission, never a claim of model-observed delivery; unknown
+native dispatch is query-only. Legacy task-launch send semantics remain intact.
+Tests execute the installed native redirect and installed tool-result transform
+path against isolated plugin rows. Actual Home model acknowledgement, binding,
+native SID/routing-row preservation and runtime installation belong to Root.

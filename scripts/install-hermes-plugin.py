@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 
 
-MANIFEST = """name: agent-resume\nversion: 0.1.10\ndescription: Exact-session wake and authenticated Gateway task bridge.\nauthor: agent-resume\nhooks:\n  - pre_gateway_dispatch\n  - pre_llm_call\n  - post_api_request\n"""
+MANIFEST = """name: agent-resume\nversion: 0.1.11\ndescription: Exact-session wake and authenticated Gateway task bridge.\nauthor: agent-resume\nhooks:\n  - pre_gateway_dispatch\n  - pre_llm_call\n  - post_api_request\n  - transform_tool_result\n"""
 
 
 def configure_gateway_tasks(home: Path, session_key: str) -> None:
