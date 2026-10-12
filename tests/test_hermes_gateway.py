@@ -76,10 +76,14 @@ def test_local_boundary_requires_bearer_and_rejects_free_form_payload():
 def test_register_exposes_gateway_hook_not_an_llm_tool_or_heartbeat():
     mod = load_module()
     calls = []
-    ctx = SimpleNamespace(register_hook=lambda *args: calls.append(args))
+    factories = []
+    mod._task_settings = lambda: {"session_key": "agent:main:telegram:group:fixture:9"}
+    ctx = SimpleNamespace(register_hook=lambda *args: calls.append(args),
+                          register_platform_handler=lambda *args: factories.append(args))
     mod.register(ctx)
     assert [call[0] for call in calls] == ["pre_gateway_dispatch", "pre_llm_call", "post_api_request"]
     assert "heartbeat" not in str(calls).lower()
+    assert factories == [("telegram", mod._on_platform_connect)]
 
 
 def test_pre_dispatch_starts_the_plugin_only_bridge_before_agent_dispatch():

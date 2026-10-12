@@ -69,12 +69,12 @@ CLI `_cli_ref` запрещён: этот route не вводит сообщен
 использует `/resume`. Core strict Gateway routing сохраняет stored origin,
 thread_id и exact SID; вторую тему/исполнителя bridge не создаёт.
 
-## Установка — только Root
+## Установка — назначенный Hermes lifecycle owner
 
 Запустить установленным Hermes Python **из точного published agent-resume source**:
 
 ```sh
-~/.hermes/hermes-agent/venv/bin/python scripts/install-hermes-plugin.py \
+/usr/bin/python3 scripts/install-hermes-plugin.py \
   --hermes-home /home/roomhacker/.hermes \
   --gateway-session-key agent:main:telegram:group:-1004360838692:9
 ```
@@ -82,9 +82,20 @@ thread_id и exact SID; вторую тему/исполнителя bridge не
 Installer сохраняет source symlink `plugins/agent-resume/__init__.py`, manifest
 с `pre_gateway_dispatch`, `pre_llm_call` и `post_api_request`; явно указанная option включает
 supported grant и merge только plugin settings, сохраняя остальные значения
-live config и canonical symlink. Без option grant не меняется. Restart/services
-и actual topic dialogue canary выполняет Root. Bridge по прежнему получает
-live Gateway context при первом genuine incoming event.
+live config и canonical symlink. Без option grant не меняется. Когда grant и
+Home key уже установлены, повторный install использует только --hermes-home;
+config не переписывается. Назначенный Hermes owner выполняет один guarded
+штатный lifecycle, Root владеет следующим business/dialogue canary.
+
+С0.1.10 configured Home platform регистрирует supported
+PluginContext.register_platform_handler connect factory. Official adapter
+передаёт gateway_runner при connect; supervised ctx.spawn_task поднимает ТОТ ЖЕ
+authenticated18791 ingress до любого incoming MessageEvent. Repeated factory и
+legacy pre_gateway_dispatch recovery разделяют один startup task/lock. Отмена
+SDK lifecycle task закрывает listener. Unconfigured legacy wake всё ещё может
+воспользоваться pre_gateway_dispatch; token/grant/native admission policy не
+меняются. После штатного restart read-only home/receipt готовы без Telegram
+сообщения, без нового business input и без создания/resume новой session.
 
 На read-only проверке 12.10.2026 stored home SID был
 `20260909_220106_70ff6a6b`, а **его** model_override — `glm-5.3-flash`/`zai`.

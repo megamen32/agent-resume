@@ -31,6 +31,8 @@ _HOST_ENV = "AGENT_RESUME_HERMES_HOST"
 _PORT_ENV = "AGENT_RESUME_HERMES_PORT"
 _PATH = "/v1/agent-resume/wake"
 _bridge: "Bridge | None" = None
+_bridge_lock: asyncio.Lock | None = None
+_bridge_task: asyncio.Task | None = None
 _ctx: Any = None
 _TASK_ACK_SECONDS = 2.0
 logger = logging.getLogger(__name__)
@@ -371,12 +373,21 @@ class Bridge:
 
 async def start_bridge(gateway: Any) -> Bridge | None:
     """Start one loopback-only receiver after the Gateway is live."""
+    global _bridge_lock
+    if _bridge_lock is None:
+        _bridge_lock = asyncio.Lock()
+    async with _bridge_lock:
+        return await _start_bridge_locked(gateway)
+
+
+async def _start_bridge_locked(gateway: Any) -> Bridge | None:
     global _bridge
     if _bridge is not None:
         return _bridge
     token = os.environ.get(_TOKEN_ENV, "")
     if not token:
         return None
+    runner = None
     try:
         port = int(os.environ.get(_PORT_ENV, "18791"))
         if not 1 <= port <= 65535:
@@ -405,15 +416,50 @@ async def start_bridge(gateway: Any) -> Bridge | None:
         await site.start()
         _bridge = Bridge(runner=runner, site=site)
         return _bridge
+    except asyncio.CancelledError:
+        if runner is not None:
+            await runner.cleanup()
+        raise
     except Exception as exc:
+        if runner is not None:
+            await runner.cleanup()
         logger.warning("agent-resume Hermes bridge did not start: %s", exc)
         return None
 
 
+async def _bridge_lifecycle(gateway: Any) -> None:
+    """The SDK owns this task; unload cancels and closes the same ingress."""
+    global _bridge
+    bridge = None
+    try:
+        bridge = await start_bridge(gateway)
+        if bridge is not None:
+            await asyncio.Future()
+    finally:
+        if bridge is not None:
+            await bridge.runner.cleanup()
+            if _bridge is bridge:
+                _bridge = None
+
+
+def _schedule_bridge(gateway: Any) -> None:
+    global _bridge_task
+    if _bridge is not None or (_bridge_task is not None and not _bridge_task.done()):
+        return
+    spawn = getattr(_ctx, "spawn_task", asyncio.create_task)
+    _bridge_task = spawn(_bridge_lifecycle(gateway), name="agent-resume-hermes-bridge")
+
+
+def _on_platform_connect(_native: Any, adapter: Any) -> None:
+    """Supported connect-time factory, before any platform MessageEvent."""
+    gateway = getattr(adapter, "gateway_runner", None)
+    if gateway is not None:
+        _schedule_bridge(gateway)
+
+
 def _on_pre_gateway_dispatch(*, gateway: Any, **_: Any) -> None:
-    """The first genuine Gateway event supplies the only live runner context."""
-    if _bridge is None:
-        asyncio.create_task(start_bridge(gateway), name="agent-resume-hermes-bridge")
+    """Compatibility recovery shares the same supervised startup and ingress."""
+    _schedule_bridge(gateway)
 
 
 class HermesGatewayAdapter:
@@ -437,3 +483,8 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", _on_task_pre_llm_call)
     ctx.register_hook("post_api_request", _on_task_post_api_request)
+    key = _task_settings().get("session_key")
+    if isinstance(key, str):
+        parts = key.split(":")
+        if len(parts) > 2 and parts[0] == "agent" and _PLATFORM_RE.fullmatch(parts[2]):
+            ctx.register_platform_handler(parts[2], _on_platform_connect)
